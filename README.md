@@ -1,3 +1,7 @@
+# vaporlink
+
+This is an initial commit for the vaporlink project.
+
 # 🌫️ VaporLink
 
 **Ephemeral chat links that disappear in 24 hours.**
