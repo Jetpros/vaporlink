@@ -54,14 +54,36 @@ npx prisma generate
 npx prisma migrate deploy
 
 # (Optional) Set up Supabase Realtime for live updates
-# See SUPABASE_REALTIME_SETUP.md for detailed instructions
+# See docs/SUPABASE_REALTIME_SETUP.md for detailed instructions
 npx prisma db push
 
 # Run development server
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to see the app.
+Visit [http://localhost:3000](http://localhost:3000) to see the app.
+
+## 📚 Documentation
+
+All documentation has been organized in the `/docs` directory:
+
+- **[Documentation Index](./docs/README.md)** - Complete guide to all documentation
+- **[Quick Start](./docs/QUICKSTART.md)** - Get running in 5 minutes
+- **[Setup Guide](./docs/SETUP.md)** - Detailed setup instructions
+- **[Supabase Realtime](./docs/SUPABASE_REALTIME_SETUP.md)** - Enable real-time features
+- **[Troubleshooting](./docs/DEBUGGING_FIXES.md)** - Common issues and solutions
+
+### Key Documentation:
+
+| Document | Purpose |
+|----------|---------|
+| [QUICKSTART.md](./docs/QUICKSTART.md) | Fast setup guide |
+| [REALTIME_QUICKSTART.md](./docs/REALTIME_QUICKSTART.md) | Enable realtime in 5 minutes |
+| [PRD.md](./docs/PRD.md) | Product requirements |
+| [ADVANCED_FEATURES.md](./docs/ADVANCED_FEATURES.md) | Feature documentation |
+| [MESSAGE_DELIVERY_FIX.md](./docs/MESSAGE_DELIVERY_FIX.md) | Message troubleshooting |
+
+Browse the `/docs` folder for comprehensive guides, implementation details, and troubleshooting help.
 
 ## 🛠️ Tech Stack
 
