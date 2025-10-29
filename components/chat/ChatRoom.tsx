@@ -63,37 +63,52 @@ export default function ChatRoom({
     enabled: true,
     callbacks: {
       onNewMessage: (message) => {
-        console.log("Realtime: New message received via WebSocket", message);
-        // Immediately refetch to get full message with relations
+        console.log("🆕 Realtime: New message received via WebSocket", message);
+        console.log("🆕 Message ID:", message.id);
+        console.log("🆕 Message content:", message.content);
+        console.log("🆕 Message roomId:", message.roomId);
+        
+        // Refetch to get full message with user relations and reactions
+        // This is necessary because realtime only sends the raw row data
         fetchMessages();
       },
       onMessageUpdate: (message) => {
-        console.log("Realtime: Message updated", message);
+        console.log("📝 Realtime: Message updated", message);
         fetchMessages();
       },
+      onMessageDelete: (messageId) => {
+        console.log("🗑️ Realtime: Message deleted", messageId);
+        // Immediately remove from UI
+        setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      },
       onParticipantJoin: (participant) => {
-        console.log("Realtime: Participant joined", participant);
+        console.log("👤 Realtime: Participant joined", participant);
+        console.log("👤 Participant ID:", participant.id);
+        console.log("👤 Display name:", participant.displayName);
+        
+        // Add to UI immediately
         setParticipants((prev) => {
           if (prev.find((p) => p.id === participant.id)) {
+            console.log("⚠️ Participant already exists, skipping");
             return prev;
           }
+          console.log("✅ Adding new participant to UI");
           return [...prev, participant];
         });
-        fetchParticipants();
       },
       onParticipantUpdate: (participant) => {
-        console.log("Realtime: Participant updated", participant);
+        console.log("👤 Realtime: Participant updated", participant);
+        // Update in UI immediately
         setParticipants((prev) =>
           prev.map((p) =>
             p.id === participant.id ? { ...p, ...participant } : p,
           ),
         );
-        fetchParticipants();
       },
       onParticipantLeave: (participantId) => {
-        console.log("Realtime: Participant left", participantId);
+        console.log("👋 Realtime: Participant left", participantId);
+        // Remove from UI immediately
         setParticipants((prev) => prev.filter((p) => p.id !== participantId));
-        fetchParticipants();
       },
       onTyping: (participantId, displayName, avatar) => {
         console.log("Realtime: User typing", displayName);
@@ -233,27 +248,28 @@ export default function ChatRoom({
     fetchParticipants();
   }, [roomId]);
 
-  // Setup polling fallback if realtime not supported OR as backup
+  // Setup polling fallback ONLY if realtime is not available
   useEffect(() => {
-    // Always poll as backup (less frequently when realtime is available)
-    const pollInterval = isRealtimeSupported ? 5000 : 2000; // 5s with realtime, 2s without
+    // Only poll if realtime is not supported or not connected
+    if (isRealtimeSupported && isConnected) {
+      console.log("✅ Using Supabase realtime - polling disabled");
+      return; // No polling needed when realtime is working
+    }
 
     console.log(
-      isRealtimeSupported
-        ? "✅ Using Supabase realtime (with 5s polling backup)"
-        : "⚠️ Supabase realtime not configured, using 2s polling",
+      "⚠️ Supabase realtime not available, using 2s polling as fallback",
     );
 
     const interval = setInterval(() => {
-      console.log("🔄 Polling for updates...");
+      console.log("🔄 Polling for updates (realtime unavailable)...");
       fetchMessages();
       fetchParticipants();
-    }, pollInterval);
+    }, 2000);
 
     return () => {
       clearInterval(interval);
     };
-  }, [roomId, isRealtimeSupported]);
+  }, [roomId, isRealtimeSupported, isConnected]);
 
   // Update participant's last seen on activity
   useEffect(() => {

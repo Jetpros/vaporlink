@@ -136,6 +136,7 @@ export function useRealtime({
     });
 
     // Subscribe to database changes for messages
+    console.log("🔍 Setting up Message table subscription with filter: roomId=eq." + roomId);
     channel
       .on(
         "postgres_changes",
@@ -146,15 +147,19 @@ export function useRealtime({
           filter: `roomId=eq.${roomId}`,
         },
         (payload) => {
-          console.log("🆕 NEW MESSAGE EVENT from Supabase:", payload);
+          console.log("🚨🚨🚨 NEW MESSAGE EVENT from Supabase! 🚨🚨🚨");
           console.log("📋 Event type:", payload.eventType);
-          console.log("📋 New data:", payload.new);
+          console.log("📋 Schema:", payload.schema);
+          console.log("📋 Table:", payload.table);
+          console.log("📋 New data:", JSON.stringify(payload.new, null, 2));
           console.log("📋 Old data:", payload.old);
+          console.log("📋 Errors:", payload.errors);
+          
           if (callbacksRef.current.onNewMessage) {
-            console.log("✅ Calling onNewMessage callback");
+            console.log("✅ Calling onNewMessage callback with data:", payload.new);
             callbacksRef.current.onNewMessage(payload.new as Message);
           } else {
-            console.log("⚠️ No onNewMessage callback defined!");
+            console.log("⚠️⚠️⚠️ No onNewMessage callback defined!");
           }
         },
       )
@@ -303,19 +308,29 @@ export function useRealtime({
       });
 
     // Subscribe to the channel
-    channel.subscribe((status) => {
+    channel.subscribe((status, err) => {
       console.log("🔔 SUPABASE REALTIME STATUS:", status);
+      if (err) {
+        console.error("❌ SUBSCRIPTION ERROR:", err);
+      }
+      
       if (status === "SUBSCRIBED") {
         setIsConnected(true);
-        console.log("✅ Successfully connected to Supabase realtime!");
+        console.log("✅✅✅ Successfully connected to Supabase realtime! ✅✅✅");
+        console.log("🔍 Room ID:", roomId);
+        console.log("🔍 Participant ID:", participantId);
+        console.log("🔍 Channel name:", `room:${roomId}`);
         console.log(
-          "✅ Listening for Message table changes (INSERT/UPDATE/DELETE)",
+          "✅ Listening for Message table changes (INSERT/UPDATE/DELETE) with filter: roomId=eq." + roomId,
         );
         console.log("✅ Listening for Participant table changes");
         console.log("✅ Listening for Reaction table changes");
         console.log("✅ Listening for broadcast events (typing)");
         console.log(
-          "⚠️ NOTE: Message events require replication to be enabled in Supabase!",
+          "⚠️⚠️⚠️ IMPORTANT: Message events require REPLICATION to be enabled in Supabase Dashboard!",
+        );
+        console.log(
+          "👉 Go to: Database > Replication > Enable 'Message' table",
         );
 
         // Track presence
