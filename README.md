@@ -18,12 +18,14 @@ This is an initial commit for the vaporlink project.
 - ⏰ **24-Hour Auto-Delete** - All messages, files, and data vanish automatically
 - 🔒 **Optional Password Protection** - Secure your chat rooms
 - 👥 **Up to 10 Participants** - Perfect for small groups
-- 💬 **Real-Time Chat** - Instant messaging with typing indicators
+- 💬 **Real-Time Chat** - Instant messaging with WebSocket-based live updates (Supabase Realtime)
+- ⚡ **Live Typing Indicators** - See when others are typing in real-time
 - 📎 **Rich Media** - Share images, videos, audio, and files
 - 🎨 **Futuristic UI** - Beautiful glassmorphism design with neon accents
 - 📱 **PWA Support** - Install on mobile and desktop
 - 🌙 **Dark Mode First** - Easy on the eyes
 - 🔐 **Privacy Focused** - No tracking, no permanent logs
+- 🌐 **WebSocket Support** - Powered by Supabase Realtime (falls back to polling if not configured)
 
 ## 🚀 Quick Start
 
@@ -32,6 +34,7 @@ This is an initial commit for the vaporlink project.
 - Node.js 18+ 
 - PostgreSQL database
 - npm/yarn/pnpm
+- (Optional) Supabase account for real-time features
 
 ### Installation
 
@@ -48,6 +51,10 @@ cp .env.example .env.local
 
 # Set up database
 npx prisma generate
+npx prisma migrate deploy
+
+# (Optional) Set up Supabase Realtime for live updates
+# See SUPABASE_REALTIME_SETUP.md for detailed instructions
 npx prisma db push
 
 # Run development server

@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useNotifications } from "@/hooks/use-notifications";
+import { useRealtime } from "@/hooks/use-realtime";
 import { formatTimeLeft } from "@/lib/utils";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
@@ -46,16 +47,84 @@ export default function ChatRoom({
   const { toast } = useToast();
   const {
     permission,
-    isSupported,
+    isSupported: isNotificationSupported,
     requestPermission,
     showMessageNotification,
   } = useNotifications();
+
+  // Supabase Realtime
+  const {
+    isConnected,
+    isSupported: isRealtimeSupported,
+    broadcastTyping,
+  } = useRealtime({
+    roomId,
+    participantId,
+    enabled: true,
+    callbacks: {
+      onNewMessage: (message) => {
+        console.log("Realtime: New message received via WebSocket", message);
+        // Immediately refetch to get full message with relations
+        fetchMessages();
+      },
+      onMessageUpdate: (message) => {
+        console.log("Realtime: Message updated", message);
+        fetchMessages();
+      },
+      onParticipantJoin: (participant) => {
+        console.log("Realtime: Participant joined", participant);
+        setParticipants((prev) => {
+          if (prev.find((p) => p.id === participant.id)) {
+            return prev;
+          }
+          return [...prev, participant];
+        });
+        fetchParticipants();
+      },
+      onParticipantUpdate: (participant) => {
+        console.log("Realtime: Participant updated", participant);
+        setParticipants((prev) =>
+          prev.map((p) =>
+            p.id === participant.id ? { ...p, ...participant } : p,
+          ),
+        );
+        fetchParticipants();
+      },
+      onParticipantLeave: (participantId) => {
+        console.log("Realtime: Participant left", participantId);
+        setParticipants((prev) => prev.filter((p) => p.id !== participantId));
+        fetchParticipants();
+      },
+      onTyping: (participantId, displayName, avatar) => {
+        console.log("Realtime: User typing", displayName);
+        setTyping((prev) => {
+          const exists = prev.find((p) => p.id === participantId);
+          if (!exists) {
+            return [...prev, { id: participantId, displayName, avatar }];
+          }
+          return prev;
+        });
+
+        // Auto-clear typing after 3 seconds
+        setTimeout(() => {
+          setTyping((prev) => prev.filter((p) => p.id !== participantId));
+        }, 3000);
+      },
+      onStopTyping: (participantId) => {
+        console.log("Realtime: User stopped typing", participantId);
+        setTyping((prev) => prev.filter((p) => p.id !== participantId));
+      },
+      onReaction: (data) => {
+        console.log("Realtime: Reaction added", data);
+        fetchMessages();
+      },
+    },
+  });
+
   const [messages, setMessages] = useState<any[]>([]);
-  const [participants, setParticipants] = useState<any[]>(
-    roomData.participants || [],
-  );
+  const [participants, setParticipants] = useState<any[]>([]);
   const [message, setMessage] = useState("");
-  const [typing, setTyping] = useState<string[]>([]);
+  const [typing, setTyping] = useState<any[]>([]); // Changed to store participant objects
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
   const [replyingTo, setReplyingTo] = useState<any | null>(null);
@@ -117,7 +186,7 @@ export default function ChatRoom({
   // Request notification permission on mount
   useEffect(() => {
     const checkNotificationPermission = async () => {
-      if (isSupported && permission === "default") {
+      if (isNotificationSupported && permission === "default") {
         // Show prompt after 3 seconds
         setTimeout(() => {
           setShowNotificationPrompt(true);
@@ -126,7 +195,7 @@ export default function ChatRoom({
     };
 
     checkNotificationPermission();
-  }, [isSupported, permission]);
+  }, [isNotificationSupported, permission]);
 
   // Detect new messages and show notifications
   useEffect(() => {
@@ -153,21 +222,38 @@ export default function ChatRoom({
     previousMessagesRef.current = messages;
   }, [messages, participantId, showMessageNotification]);
 
+  // Load initial data on mount
   useEffect(() => {
-    // Load initial messages
+    console.log("=== INITIAL LOAD ===");
+    console.log("Loading initial messages and participants for room:", roomId);
+    console.log("Room data:", roomData);
+    console.log("Realtime supported:", isRealtimeSupported);
+    console.log("Realtime connected:", isConnected);
     fetchMessages();
+    fetchParticipants();
+  }, [roomId]);
 
-    // TODO: Setup Socket.io connection
-    // For now, we'll poll for messages every 2 seconds
+  // Setup polling fallback if realtime not supported OR as backup
+  useEffect(() => {
+    // Always poll as backup (less frequently when realtime is available)
+    const pollInterval = isRealtimeSupported ? 5000 : 2000; // 5s with realtime, 2s without
+
+    console.log(
+      isRealtimeSupported
+        ? "✅ Using Supabase realtime (with 5s polling backup)"
+        : "⚠️ Supabase realtime not configured, using 2s polling",
+    );
+
     const interval = setInterval(() => {
+      console.log("🔄 Polling for updates...");
       fetchMessages();
-    }, 2000);
+      fetchParticipants();
+    }, pollInterval);
 
-    // Cleanup on unmount or room change
     return () => {
       clearInterval(interval);
     };
-  }, [roomId]);
+  }, [roomId, isRealtimeSupported]);
 
   // Update participant's last seen on activity
   useEffect(() => {
@@ -176,13 +262,24 @@ export default function ChatRoom({
         await fetch(`/api/participants/${participantId}/seen`, {
           method: "POST",
         });
+        // Update local participant state immediately
+        setParticipants((prev) =>
+          prev.map((p) =>
+            p.id === participantId
+              ? { ...p, lastSeenAt: new Date().toISOString(), isOnline: true }
+              : p,
+          ),
+        );
       } catch (error) {
         console.error("Error updating last seen:", error);
       }
     };
 
-    // Update last seen every 30 seconds
-    const lastSeenInterval = setInterval(updateLastSeen, 30000);
+    // Update immediately on mount
+    updateLastSeen();
+
+    // Update last seen every 10 seconds (more frequent for better online status)
+    const lastSeenInterval = setInterval(updateLastSeen, 10000);
 
     return () => clearInterval(lastSeenInterval);
   }, [participantId]);
@@ -234,13 +331,48 @@ export default function ChatRoom({
 
   const fetchMessages = async () => {
     try {
+      console.log("📥 Fetching messages for room:", roomId);
       const response = await fetch(`/api/messages?roomId=${roomId}`);
+      console.log("📊 Messages response status:", response.status);
       if (response.ok) {
         const data = await response.json();
+        console.log(
+          "✅ Messages loaded:",
+          data.messages?.length || 0,
+          "messages",
+        );
+        if (data.messages) {
+          console.log("Last message:", data.messages[data.messages.length - 1]);
+        }
         setMessages(data.messages || []);
+      } else {
+        console.error("❌ Failed to fetch messages:", response.statusText);
+        const errorText = await response.text();
+        console.error("Error details:", errorText);
       }
     } catch (error) {
-      console.error("Error fetching messages:", error);
+      console.error("❌ Error fetching messages:", error);
+    }
+  };
+
+  const fetchParticipants = async () => {
+    try {
+      console.log("Fetching participants for room:", roomId);
+      const response = await fetch(`/api/participants?roomId=${roomId}`);
+      console.log("Participants response status:", response.status);
+      if (response.ok) {
+        const data = await response.json();
+        console.log(
+          "Participants data:",
+          data.participants?.length || 0,
+          "participants",
+        );
+        setParticipants(data.participants || []);
+      } else {
+        console.error("Failed to fetch participants:", response.statusText);
+      }
+    } catch (error) {
+      console.error("Error fetching participants:", error);
     }
   };
 
@@ -251,6 +383,44 @@ export default function ChatRoom({
   ) => {
     const messageContent = content || message.trim();
     if (!messageContent && !fileData) return;
+
+    // Get current participant for optimistic update
+    const currentParticipant = participants.find((p) => p.id === participantId);
+
+    // Create optimistic message
+    const optimisticMessage = {
+      id: `temp-${Date.now()}`,
+      roomId,
+      userId: participantId,
+      content: messageContent,
+      type,
+      fileUrl: fileData?.url || null,
+      fileName: fileData?.name || null,
+      fileSize: fileData?.size || null,
+      duration: fileData?.duration || null,
+      createdAt: new Date().toISOString(),
+      replyToId: replyingTo?.id || null,
+      user: currentParticipant || {
+        id: participantId,
+        displayName: "You",
+        avatar: "",
+      },
+      reactions: [],
+      replyTo: replyingTo || null,
+      isOptimistic: true,
+    };
+
+    console.log("📤 Sending message:", messageContent);
+    console.log("Optimistic message:", optimisticMessage);
+
+    // Immediately add optimistic message to UI
+    setMessages((prev) => [...prev, optimisticMessage]);
+    setMessage("");
+    setReplyingTo(null);
+
+    // Scroll to bottom immediately
+    shouldAutoScrollRef.current = true;
+    setUserScrolled(false);
 
     try {
       const payload: any = {
@@ -276,25 +446,43 @@ export default function ChatRoom({
         }
       }
 
+      console.log("📡 Posting message to API...");
       const response = await fetch("/api/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
+      console.log("📊 Send message response status:", response.status);
+
       if (!response.ok) {
-        throw new Error("Failed to send message");
+        const errorData = await response.json();
+        console.error("❌ Send message failed:", errorData);
+        throw new Error(errorData.error || "Failed to send message");
       }
 
-      setMessage("");
-      setReplyingTo(null);
+      const responseData = await response.json();
+      console.log("✅ Message sent successfully:", responseData);
 
-      // Always scroll to bottom when user sends a message
-      shouldAutoScrollRef.current = true;
-      setUserScrolled(false);
+      // Stop typing broadcast when message is sent
+      broadcastTyping(
+        false,
+        currentParticipant?.displayName,
+        currentParticipant?.avatar,
+      );
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
 
-      fetchMessages();
+      // Refetch to replace optimistic message with real one
+      console.log("🔄 Refetching messages to get real data...");
+      await fetchMessages();
     } catch (error: any) {
+      console.error("❌ Error sending message:", error);
+
+      // Remove optimistic message on error
+      setMessages((prev) => prev.filter((m) => m.id !== optimisticMessage.id));
+
       toast({
         title: "Error",
         description: error.message || "Failed to send message",
@@ -307,9 +495,41 @@ export default function ChatRoom({
     file: File,
     type: "image" | "video" | "file" | "audio",
   ) => {
-    const url = URL.createObjectURL(file);
-    setFilePreviews([{ file, type, url, caption: "" }]);
-    setShowFileModal(true);
+    console.log("📎 File selected:", file.name, "Type:", type);
+
+    // If user explicitly selected Photo/Video/Audio, send directly as inline media
+    if (type === "image" || type === "video" || type === "audio") {
+      console.log("📸 Sending as inline media:", type);
+      setUploadingFile(true);
+
+      try {
+        const base64 = await fileToBase64(file);
+        await handleSendMessage("", type, {
+          url: base64,
+          name: file.name,
+          size: file.size,
+        });
+
+        toast({
+          title: "Success",
+          description: `${type.charAt(0).toUpperCase() + type.slice(1)} sent successfully`,
+        });
+      } catch (error: any) {
+        toast({
+          title: "Error",
+          description: error.message || `Failed to send ${type}`,
+          variant: "destructive",
+        });
+      } finally {
+        setUploadingFile(false);
+      }
+    } else {
+      // If user selected "File", show modal (even for images/videos/audio)
+      console.log("📄 Sending as file attachment");
+      const url = URL.createObjectURL(file);
+      setFilePreviews([{ file, type: "file", url, caption: "" }]);
+      setShowFileModal(true);
+    }
   };
 
   const handleAddMoreFiles = () => {
@@ -431,6 +651,22 @@ export default function ChatRoom({
     }
   };
 
+  const handleReply = (messageId: string) => {
+    const msg = messages.find((m) => m.id === messageId);
+    if (msg) {
+      setReplyingTo(msg);
+    }
+  };
+
+  const handleReplyClick = (messageId: string) => {
+    const element = messageRefs.current[messageId];
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedMessageId(messageId);
+      setTimeout(() => setHighlightedMessageId(null), 2000);
+    }
+  };
+
   // Helper functions
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -468,13 +704,6 @@ export default function ChatRoom({
     return groups;
   }, []);
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
-
   const handleLeave = () => {
     // Clear the session from localStorage
     localStorage.removeItem(`vaporlink_session_${roomId}`);
@@ -505,7 +734,14 @@ export default function ChatRoom({
     return timeLeft > 0 && timeLeft <= thirtyMinutes;
   };
 
-  const onlineParticipants = participants.filter((p) => p.isOnline);
+  // Calculate online participants (active within last 30 seconds)
+  const onlineParticipants = participants.filter((p) => {
+    if (p.id === participantId) return true; // Current user is always online
+    const lastSeen = new Date(p.lastSeenAt);
+    const now = new Date();
+    const thirtySecondsAgo = new Date(now.getTime() - 30000);
+    return lastSeen > thirtySecondsAgo;
+  });
 
   return (
     <div className="h-screen flex bg-gray-50">
@@ -524,11 +760,38 @@ export default function ChatRoom({
             {/* Left: Room Info */}
             <div className="flex items-center gap-3">
               <div>
-                <h1 className="text-lg font-semibold text-gray-900">
+                <h1 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
                   {roomData.name || "Chat Room"}
+                  {/* Realtime Status Badge */}
+                  {isRealtimeSupported && (
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                        isConnected
+                          ? "bg-green-50 text-green-700 border border-green-200"
+                          : "bg-gray-50 text-gray-500 border border-gray-200"
+                      }`}
+                      title={
+                        isConnected
+                          ? "Connected to live updates"
+                          : "Connecting to live updates..."
+                      }
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          isConnected
+                            ? "bg-green-500 animate-pulse"
+                            : "bg-gray-400"
+                        }`}
+                      ></span>
+                      {isConnected ? "LIVE" : "CONNECTING"}
+                    </span>
+                  )}
                 </h1>
                 <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <span>{participants.length} members</span>
+                  <span>
+                    {participants.length} member
+                    {participants.length !== 1 ? "s" : ""}
+                  </span>
                   <span className="text-gray-300">•</span>
                   <span>{onlineParticipants.length} online</span>
                 </div>
@@ -607,7 +870,28 @@ export default function ChatRoom({
 
         {/* Notification Permission Prompt */}
         {showNotificationPrompt && permission === "default" && (
-          <div className="bg-gradient-to-r from-purple-500 to-indigo-500 text-white px-6 py-3 flex items-center justify-between shadow-lg">
+          <div className="bg-gradient-to-r from-purple-500 to-indigo-500 text-white px-6 py-3 flex items-center justify-between shadow-lg relative">
+            {/* Realtime Status Indicator */}
+            {isRealtimeSupported && (
+              <div className="absolute top-2 right-2">
+                <div
+                  className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs ${
+                    isConnected
+                      ? "bg-green-500/20 text-green-100"
+                      : "bg-red-500/20 text-red-100"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isConnected ? "bg-green-300 animate-pulse" : "bg-red-300"
+                    }`}
+                  ></span>
+                  <span className="font-medium">
+                    {isConnected ? "Live" : "Connecting..."}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               <div className="bg-white/20 rounded-full p-2">
                 <svg
@@ -722,6 +1006,7 @@ export default function ChatRoom({
                   ref={(el) => {
                     if (el) messageRefs.current[msg.id] = el;
                   }}
+                  className={msg.isOptimistic ? "opacity-70" : ""}
                 >
                   <MessageBubble
                     message={msg}
@@ -738,6 +1023,12 @@ export default function ChatRoom({
                     onReplyClick={scrollToMessage}
                     isHighlighted={highlightedMessageId === msg.id}
                   />
+                  {msg.isOptimistic && (
+                    <div className="flex items-center justify-end gap-1 px-2 text-xs text-gray-400">
+                      <div className="w-1 h-1 bg-gray-400 rounded-full animate-pulse" />
+                      <span>Sending...</span>
+                    </div>
+                  )}
                 </div>
               ))}
 
@@ -824,8 +1115,66 @@ export default function ChatRoom({
                   <Textarea
                     ref={textareaRef}
                     value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    onKeyPress={handleKeyPress}
+                    onChange={(e) => {
+                      setMessage(e.target.value);
+
+                      // Broadcast typing indicator with user info
+                      if (e.target.value.trim()) {
+                        // Find current participant info
+                        const currentParticipant = participants.find(
+                          (p) => p.id === participantId,
+                        );
+                        broadcastTyping(
+                          true,
+                          currentParticipant?.displayName,
+                          currentParticipant?.avatar,
+                        );
+
+                        // Clear previous timeout
+                        if (typingTimeoutRef.current) {
+                          clearTimeout(typingTimeoutRef.current);
+                        }
+
+                        // Set timeout to stop typing after 2 seconds of inactivity
+                        typingTimeoutRef.current = setTimeout(() => {
+                          const currentParticipant = participants.find(
+                            (p) => p.id === participantId,
+                          );
+                          broadcastTyping(
+                            false,
+                            currentParticipant?.displayName,
+                            currentParticipant?.avatar,
+                          );
+                        }, 2000);
+                      } else {
+                        const currentParticipant = participants.find(
+                          (p) => p.id === participantId,
+                        );
+                        broadcastTyping(
+                          false,
+                          currentParticipant?.displayName,
+                          currentParticipant?.avatar,
+                        );
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                        // Stop typing broadcast when message is sent
+                        const currentParticipant = participants.find(
+                          (p) => p.id === participantId,
+                        );
+                        broadcastTyping(
+                          false,
+                          currentParticipant?.displayName,
+                          currentParticipant?.avatar,
+                        );
+                        if (typingTimeoutRef.current) {
+                          clearTimeout(typingTimeoutRef.current);
+                        }
+                      }
+                    }}
                     placeholder="Your message"
                     className="bg-transparent border-0 focus-visible:ring-0 focus-visible:ring-offset-0 text-gray-900 placeholder:text-gray-500 p-0 resize-none min-h-[24px] max-h-[144px] overflow-y-auto"
                     disabled={uploadingFile}
@@ -837,7 +1186,58 @@ export default function ChatRoom({
                   <Button
                     variant="ghost"
                     size="icon"
-                    onClick={() => setIsRecordingVoice(true)}
+                    onClick={async () => {
+                      console.log("🎤 Voice recording button clicked");
+                      try {
+                        // Check if browser supports media devices
+                        if (
+                          !navigator.mediaDevices ||
+                          !navigator.mediaDevices.getUserMedia
+                        ) {
+                          toast({
+                            title: "Not Supported",
+                            description:
+                              "Voice recording is not supported in your browser",
+                            variant: "destructive",
+                          });
+                          return;
+                        }
+
+                        // Request microphone permission
+                        console.log("🎤 Requesting microphone permission...");
+                        await navigator.mediaDevices.getUserMedia({
+                          audio: true,
+                        });
+                        console.log("✅ Microphone permission granted");
+                        setIsRecordingVoice(true);
+                      } catch (error: any) {
+                        console.error("❌ Microphone error:", error);
+                        if (
+                          error.name === "NotAllowedError" ||
+                          error.name === "PermissionDeniedError"
+                        ) {
+                          toast({
+                            title: "Permission Denied",
+                            description:
+                              "Please allow microphone access to record voice messages",
+                            variant: "destructive",
+                          });
+                        } else if (error.name === "NotFoundError") {
+                          toast({
+                            title: "No Microphone",
+                            description: "No microphone found on your device",
+                            variant: "destructive",
+                          });
+                        } else {
+                          toast({
+                            title: "Error",
+                            description:
+                              "Failed to access microphone: " + error.message,
+                            variant: "destructive",
+                          });
+                        }
+                      }
+                    }}
                     className="text-gray-500 hover:text-gray-700 rounded-full"
                     disabled={uploadingFile}
                   >
