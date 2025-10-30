@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 import { generateRoomId } from "@/lib/utils";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
@@ -19,9 +19,7 @@ export async function POST(req: NextRequest) {
     let uniqueId = generateRoomId();
     let attempts = 0;
     while (attempts < 10) {
-      const existing = await prisma.room.findUnique({
-        where: { uniqueId },
-      });
+      const existing = memoryStore.getRoomByUniqueId(uniqueId);
       if (!existing) break;
       uniqueId = generateRoomId();
       attempts++;
@@ -35,7 +33,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Hash password if provided
-    const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
+    const hashedPassword = password ? await bcrypt.hash(password, 10) : undefined;
 
     // Create room with duration stored, expiresAt will be set on first join
     // Set a placeholder expiresAt far in the future until first join
@@ -43,15 +41,21 @@ export async function POST(req: NextRequest) {
       Date.now() + 365 * 24 * 60 * 60 * 1000
     );
 
-    const room = await prisma.room.create({
-      data: {
-        name,
-        uniqueId,
-        password: hashedPassword,
-        expiresAt: placeholderExpiresAt,
-        durationHours,
-      },
+    const room = memoryStore.createRoom({
+      name,
+      uniqueId,
+      password: hashedPassword,
+      expiresAt: placeholderExpiresAt,
+      durationHours,
+      createdAt: new Date(),
+      maxUsers: 10,
+      isDeleted: false,
     });
+
+    console.log(`🎉 Room created successfully!`);
+    console.log(`   UniqueID: ${room.uniqueId}`);
+    console.log(`   Internal ID: ${room.id}`);
+    console.log(`   Memory Store Stats:`, memoryStore.getStats());
 
     return NextResponse.json({
       success: true,

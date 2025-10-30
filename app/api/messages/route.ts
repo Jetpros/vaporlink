@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,49 +14,59 @@ export async function GET(req: NextRequest) {
     }
 
     // Find room by uniqueId
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: roomId },
-    });
+    const room = memoryStore.getRoomByUniqueId(roomId);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
     }
 
     // Get messages
-    const messages = await prisma.message.findMany({
-      where: { roomId: room.id },
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-        reactions: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                avatar: true,
-              },
-            },
-          },
-        },
-        replyTo: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                avatar: true,
-              },
-            },
-          },
-        },
-      },
-      orderBy: { createdAt: "asc" },
+    const rawMessages = memoryStore.getMessagesByRoomId(room.id);
+    
+    // Enrich messages with user data and reactions
+    const messages = rawMessages.map(message => {
+      const participant = memoryStore.getParticipantById(message.userId);
+      const reactions = memoryStore.getReactionsByMessageId(message.id).map(reaction => {
+        const reactionUser = memoryStore.getParticipantById(reaction.userId);
+        return {
+          ...reaction,
+          createdAt: reaction.createdAt.toISOString(),
+          user: reactionUser ? {
+            id: reactionUser.id,
+            displayName: reactionUser.displayName,
+            avatar: reactionUser.avatar,
+          } : null,
+        };
+      });
+      
+      let replyTo = null;
+      if (message.replyToId) {
+        const replyToMessage = memoryStore.getMessageById(message.replyToId);
+        if (replyToMessage) {
+          const replyToParticipant = memoryStore.getParticipantById(replyToMessage.userId);
+          replyTo = {
+            ...replyToMessage,
+            createdAt: replyToMessage.createdAt.toISOString(),
+            user: replyToParticipant ? {
+              id: replyToParticipant.id,
+              displayName: replyToParticipant.displayName,
+              avatar: replyToParticipant.avatar,
+            } : null,
+          };
+        }
+      }
+      
+      return {
+        ...message,
+        createdAt: message.createdAt.toISOString(),
+        user: participant ? {
+          id: participant.id,
+          displayName: participant.displayName,
+          avatar: participant.avatar,
+        } : null,
+        reactions,
+        replyTo,
+      };
     });
 
     return NextResponse.json({ messages });
@@ -81,6 +91,8 @@ export async function POST(req: NextRequest) {
       fileSize,
       duration,
       replyToId,
+      mediaWidth,
+      mediaHeight,
     } = await req.json();
 
     if (!roomId || !participantId) {
@@ -91,18 +103,14 @@ export async function POST(req: NextRequest) {
     }
 
     // Find room by uniqueId
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: roomId },
-    });
+    const room = memoryStore.getRoomByUniqueId(roomId);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
     }
 
     // Verify participant exists
-    const participant = await prisma.participant.findUnique({
-      where: { id: participantId },
-    });
+    const participant = memoryStore.getParticipantById(participantId);
 
     if (!participant) {
       return NextResponse.json(
@@ -112,50 +120,81 @@ export async function POST(req: NextRequest) {
     }
 
     // Create message
-    const message = await prisma.message.create({
-      data: {
-        roomId: room.id,
-        userId: participantId,
-        content: content || "",
-        type: type || "text",
-        fileUrl,
-        fileName,
-        fileSize,
-        duration,
-        replyToId,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-        reactions: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                avatar: true,
-              },
-            },
-          },
-        },
-        replyTo: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                displayName: true,
-                avatar: true,
-              },
-            },
-          },
-        },
-      },
+    const rawMessage = memoryStore.createMessage({
+      roomId: room.id,
+      userId: participantId,
+      content: content || "",
+      type: type || "text",
+      fileUrl,
+      fileName,
+      fileSize,
+      duration,
+      replyToId,
+      mediaWidth,
+      mediaHeight,
     });
+
+    // Enrich message with user data and reactions
+    const reactions = memoryStore.getReactionsByMessageId(rawMessage.id).map(reaction => {
+      const reactionUser = memoryStore.getParticipantById(reaction.userId);
+      return {
+        ...reaction,
+        createdAt: reaction.createdAt.toISOString(),
+        user: reactionUser ? {
+          id: reactionUser.id,
+          displayName: reactionUser.displayName,
+          avatar: reactionUser.avatar,
+        } : null,
+      };
+    });
+
+    let replyTo = null;
+    if (rawMessage.replyToId) {
+      const replyToMessage = memoryStore.getMessageById(rawMessage.replyToId);
+      if (replyToMessage) {
+        const replyToParticipant = memoryStore.getParticipantById(replyToMessage.userId);
+        replyTo = {
+          ...replyToMessage,
+          createdAt: replyToMessage.createdAt.toISOString(),
+          user: replyToParticipant ? {
+            id: replyToParticipant.id,
+            displayName: replyToParticipant.displayName,
+            avatar: replyToParticipant.avatar,
+          } : null,
+        };
+      }
+    }
+
+    const message = {
+      ...rawMessage,
+      createdAt: rawMessage.createdAt.toISOString(),
+      user: {
+        id: participant.id,
+        displayName: participant.displayName,
+        avatar: participant.avatar,
+      },
+      reactions,
+      replyTo,
+    };
+
+    // Broadcast message via Socket.IO using uniqueId (not internal id)
+    try {
+      const { getSocketServer } = await import('@/server/socket-server');
+      const socketServer = getSocketServer();
+      console.log('📡 API Route - Attempting to get socket server...');
+      console.log('📡 API Route - Global vaporlinkSocketServer exists:', typeof globalThis !== 'undefined' && (globalThis as any).vaporlinkSocketServer ? 'YES' : 'NO');
+      console.log('📡 API Route - Socket server instance:', socketServer ? 'FOUND' : 'NOT FOUND');
+      
+      if (socketServer) {
+        console.log(`📡 Broadcasting message to room: ${room.uniqueId} (internal: ${room.id})`);
+        socketServer.broadcastMessage(room.uniqueId, message);
+        console.log('📡 Message broadcast attempted');
+      } else {
+        console.log('❌ Socket server not available in API route - messages will not be real-time');
+      }
+    } catch (error) {
+      console.error('❌ Error accessing socket server:', error);
+    }
 
     return NextResponse.json({ message });
   } catch (error) {

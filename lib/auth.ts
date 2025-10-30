@@ -1,12 +1,11 @@
 import { NextAuthOptions } from 'next-auth'
-import { PrismaAdapter } from '@auth/prisma-adapter'
 import GoogleProvider from 'next-auth/providers/google'
 import CredentialsProvider from 'next-auth/providers/credentials'
-import { prisma } from './prisma'
+import { memoryStore } from './memory-store'
 import bcrypt from 'bcryptjs'
 
 export const authOptions: NextAuthOptions = {
-  adapter: PrismaAdapter(prisma) as any,
+  // No adapter needed - using JWT sessions with in-memory store
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID || '',
@@ -23,9 +22,7 @@ export const authOptions: NextAuthOptions = {
           throw new Error('Invalid credentials')
         }
 
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email },
-        })
+        const user = memoryStore.getUserByEmail(credentials.email)
 
         if (!user || !user.password) {
           throw new Error('Invalid credentials')
@@ -53,9 +50,22 @@ export const authOptions: NextAuthOptions = {
     signIn: '/auth/signin',
   },
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, account }) {
       if (user) {
         token.id = user.id
+        
+        // Store user in memory if new (OAuth flow)
+        if (account?.provider === 'google') {
+          const existingUser = memoryStore.getUserByEmail(user.email || '');
+          if (!existingUser && user.email) {
+            memoryStore.createUser({
+              email: user.email,
+              name: user.name || undefined,
+              image: user.image || undefined,
+              provider: 'google',
+            });
+          }
+        }
       }
       return token
     },

@@ -13,25 +13,20 @@ export default function CountdownTimer({
   firstJoinAt,
 }: CountdownTimerProps) {
   const [timeLeft, setTimeLeft] = useState(() => {
-    // Only calculate countdown if room has been started (firstJoinAt exists)
-    if (!firstJoinAt) {
-      return "Waiting to start...";
-    }
-    return formatTimeLeft(expiresAt, firstJoinAt);
+    // Start countdown immediately using firstJoinAt or current time
+    const startTime = firstJoinAt || new Date();
+    return formatTimeLeft(expiresAt, startTime);
   });
 
   useEffect(() => {
-    // If room hasn't started, don't run the interval
-    if (!firstJoinAt) {
-      setTimeLeft("Waiting to start...");
-      return;
-    }
-
-    // Update immediately when firstJoinAt changes
-    setTimeLeft(formatTimeLeft(expiresAt, firstJoinAt));
+    // Use firstJoinAt if available, otherwise use current time to start countdown immediately
+    const startTime = firstJoinAt || new Date();
+    
+    // Update immediately
+    setTimeLeft(formatTimeLeft(expiresAt, startTime));
 
     const interval = setInterval(() => {
-      const newTimeLeft = formatTimeLeft(expiresAt, firstJoinAt);
+      const newTimeLeft = formatTimeLeft(expiresAt, startTime);
       setTimeLeft(newTimeLeft);
 
       if (newTimeLeft === "Expired") {
@@ -45,21 +40,15 @@ export default function CountdownTimer({
   // Check if less than 30 minutes (no hours and minutes < 30)
   const isExpiringSoon =
     timeLeft !== "Expired" &&
-    timeLeft !== "Waiting to start..." &&
     !timeLeft.includes("h") &&
     parseInt(timeLeft.split("m")[0]) < 30;
-
-  // Check if waiting to start
-  const isWaiting = timeLeft === "Waiting to start...";
 
   return (
     <div
       className={`px-4 py-2 rounded-full border transition-all ${
-        isWaiting
-          ? "bg-blue-50 border-blue-300 text-blue-700"
-          : isExpiringSoon
-            ? "bg-red-50 border-red-300 text-red-700"
-            : "bg-gray-50 border-gray-200 text-gray-700"
+        isExpiringSoon
+          ? "bg-red-50 border-red-300 text-red-700"
+          : "bg-gray-50 border-gray-200 text-gray-700"
       }`}
     >
       <span className="text-sm font-medium tabular-nums">{timeLeft}</span>

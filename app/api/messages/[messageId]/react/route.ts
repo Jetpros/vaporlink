@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 
 export async function POST(
   req: NextRequest,
@@ -17,56 +17,106 @@ export async function POST(
     }
 
     // Check if user already has a reaction on this message
-    const existingReaction = await prisma.reaction.findFirst({
-      where: {
-        messageId,
-        userId: participantId,
-      },
-    });
+    const existingReaction = memoryStore.getReactionByMessageAndUser(messageId, participantId);
 
     if (existingReaction) {
       // If user clicked the same emoji, remove it (toggle off)
       if (existingReaction.emoji === emoji) {
-        await prisma.reaction.delete({
-          where: { id: existingReaction.id },
-        });
+        memoryStore.deleteReaction(existingReaction.id);
+        
+        // Broadcast reaction removal via Socket.IO
+        const message = memoryStore.getMessageById(messageId);
+        if (message) {
+          const room = memoryStore.getRoomById(message.roomId);
+          if (room) {
+            const { getSocketServer } = await import('@/server/socket-server');
+            const socketServer = getSocketServer();
+            if (socketServer) {
+              socketServer.broadcastReaction(room.uniqueId, {
+                messageId,
+                userId: participantId,
+                emoji: '',
+              });
+            }
+          }
+        }
+        
         return NextResponse.json({ removed: true });
       }
 
       // If user clicked a different emoji, update their reaction
-      const updatedReaction = await prisma.reaction.update({
-        where: { id: existingReaction.id },
-        data: { emoji },
-        include: {
-          user: {
-            select: {
-              id: true,
-              displayName: true,
-              avatar: true,
-            },
-          },
-        },
+      const participant = memoryStore.getParticipantById(participantId);
+      const updatedReaction = {
+        ...existingReaction,
+        emoji,
+        user: participant ? {
+          id: participant.id,
+          displayName: participant.displayName,
+          avatar: participant.avatar,
+        } : null,
+      };
+      
+      // Update in memory
+      memoryStore.createReaction({
+        messageId,
+        userId: participantId,
+        emoji,
       });
+      
+      // Broadcast reaction via Socket.IO
+      const message = memoryStore.getMessageById(messageId);
+      if (message) {
+        const room = memoryStore.getRoomById(message.roomId);
+        if (room) {
+          const { getSocketServer } = await import('@/server/socket-server');
+          const socketServer = getSocketServer();
+          if (socketServer) {
+            socketServer.broadcastReaction(room.uniqueId, {
+              messageId,
+              userId: participantId,
+              emoji,
+            });
+          }
+        }
+      }
+      
       return NextResponse.json({ reaction: updatedReaction, updated: true });
     }
 
     // Create new reaction
-    const reaction = await prisma.reaction.create({
-      data: {
-        messageId,
-        userId: participantId,
-        emoji,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            displayName: true,
-            avatar: true,
-          },
-        },
-      },
+    const rawReaction = memoryStore.createReaction({
+      messageId,
+      userId: participantId,
+      emoji,
     });
+    
+    const participant = memoryStore.getParticipantById(participantId);
+    const reaction = {
+      ...rawReaction,
+      createdAt: rawReaction.createdAt.toISOString(),
+      user: participant ? {
+        id: participant.id,
+        displayName: participant.displayName,
+        avatar: participant.avatar,
+      } : null,
+    };
+    
+    // Broadcast reaction via Socket.IO
+    const message = memoryStore.getMessageById(messageId);
+    if (message) {
+      const room = memoryStore.getRoomById(message.roomId);
+      if (room) {
+        const { getSocketServer } = await import('@/server/socket-server');
+        const socketServer = getSocketServer();
+        if (socketServer) {
+          socketServer.broadcastReaction(room.uniqueId, {
+            messageId,
+            userId: participantId,
+            emoji,
+          });
+        }
+      }
+    }
 
     return NextResponse.json({ reaction });
   } catch (error) {

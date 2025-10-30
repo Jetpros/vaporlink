@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
+import { deleteManyFromCloudinary } from "@/lib/cloudinary";
 
 /**
  * Cleanup expired rooms and their related data
  * This should be called by a cron job (e.g., Vercel Cron or Upstash QStash)
  * Run every hour or every few minutes
+ *
+ * Note: With in-memory storage, cleanup happens automatically via the
+ * memory-store's internal cleanup interval. This endpoint is kept for
+ * manual triggering and monitoring purposes.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -16,71 +21,83 @@ export async function GET(req: NextRequest) {
 
     const now = new Date();
 
-    // Find expired rooms based on expiresAt field
-    const expiredRooms = await prisma.room.findMany({
-      where: {
-        expiresAt: { lt: now },
-        isDeleted: false,
-      },
-    });
+    // Find expired rooms
+    const allRooms = memoryStore.getAllRooms();
+    const expiredRooms = allRooms.filter(
+      (room) => room.expiresAt < now && !room.isDeleted
+    );
 
-    if (expiredRooms.length > 0) {
-      const roomsToDelete = expiredRooms.map((r) => r.id);
+    // Cleanup Cloudinary files for expired rooms
+    let totalCloudinaryDeleted = 0;
+    let totalCloudinaryFailed = 0;
 
-      // Delete reactions first (due to foreign key constraints)
-      await prisma.reaction.deleteMany({
-        where: {
-          message: {
-            roomId: { in: roomsToDelete },
-          },
-        },
-      });
+    for (const room of expiredRooms) {
+      // Get all messages with files from this room
+      const messages = memoryStore.getMessagesByRoomId(room.id);
+      const filesWithPublicIds = messages
+        .filter((msg) => msg.fileUrl && msg.publicId)
+        .map((msg) => {
+          // Determine resource type based on message type
+          let resourceType: "image" | "video" | "raw" = "raw";
+          if (msg.type === "image") resourceType = "image";
+          else if (msg.type === "video") resourceType = "video";
+          else if (msg.type === "voice" || msg.type === "audio")
+            resourceType = "video"; // Audio files are stored as video type in Cloudinary
 
-      // Delete all messages (cascade will handle reactions)
-      await prisma.message.deleteMany({
-        where: { roomId: { in: roomsToDelete } },
-      });
+          return {
+            publicId: msg.publicId!,
+            resourceType,
+          };
+        });
 
-      // Delete all participants
-      await prisma.participant.deleteMany({
-        where: { roomId: { in: roomsToDelete } },
-      });
-
-      // Mark rooms as deleted (keep the record for "room not available" message)
-      await prisma.room.updateMany({
-        where: { id: { in: roomsToDelete } },
-        data: { isDeleted: true },
-      });
-
-      console.log(`Cleaned up ${roomsToDelete.length} expired rooms`);
+      if (filesWithPublicIds.length > 0) {
+        console.log(
+          `🗑️ Deleting ${filesWithPublicIds.length} Cloudinary files for room ${room.uniqueId}`
+        );
+        const result = await deleteManyFromCloudinary(filesWithPublicIds);
+        totalCloudinaryDeleted += result.deleted;
+        totalCloudinaryFailed += result.failed;
+      }
     }
 
-    // Also cleanup rooms that were created but never joined after 48 hours
+    // Mark expired rooms as deleted
+    expiredRooms.forEach((room) => {
+      memoryStore.updateRoom(room.id, { isDeleted: true });
+    });
+
+    // Cleanup rooms that were created but never joined after 48 hours
     const twoDaysAgo = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+    const unjoinedRooms = allRooms.filter(
+      (room) =>
+        !room.firstJoinAt && room.createdAt < twoDaysAgo && !room.isDeleted
+    );
 
-    const unjoined = await prisma.room.findMany({
-      where: {
-        firstJoinAt: null,
-        createdAt: { lt: twoDaysAgo },
-        isDeleted: false,
-      },
+    // Mark unjoined rooms as deleted
+    unjoinedRooms.forEach((room) => {
+      memoryStore.updateRoom(room.id, { isDeleted: true });
     });
 
-    if (unjoined.length > 0) {
-      const unjoinedIds = unjoined.map((r: any) => r.id);
+    // Cleanup expired sessions and rate limits
+    const deletedSessions = memoryStore.deleteExpiredSessions();
+    const deletedRateLimits = memoryStore.deleteExpiredRateLimits();
 
-      await prisma.room.updateMany({
-        where: { id: { in: unjoinedIds } },
-        data: { isDeleted: true },
-      });
-
-      console.log(`Cleaned up ${unjoined.length} unjoined rooms`);
-    }
+    console.log(`Cleaned up ${expiredRooms.length} expired rooms`);
+    console.log(`Cleaned up ${unjoinedRooms.length} unjoined rooms`);
+    console.log(
+      `Cleaned up ${totalCloudinaryDeleted} Cloudinary files (${totalCloudinaryFailed} failed)`
+    );
+    console.log(`Cleaned up ${deletedSessions} expired sessions`);
+    console.log(`Cleaned up ${deletedRateLimits} expired rate limits`);
 
     return NextResponse.json({
       success: true,
       deletedExpired: expiredRooms.length,
-      deletedUnjoined: unjoined.length,
+      deletedUnjoined: unjoinedRooms.length,
+      cloudinaryDeleted: totalCloudinaryDeleted,
+      cloudinaryFailed: totalCloudinaryFailed,
+      deletedSessions,
+      deletedRateLimits,
+      stats: memoryStore.getStats(),
     });
   } catch (error) {
     console.error("Error in cleanup cron:", error);

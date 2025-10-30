@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { memoryStore } from '@/lib/memory-store'
 
 export async function POST(
   req: NextRequest,
@@ -9,12 +9,9 @@ export async function POST(
     const { id } = params
 
     // Update participant's last seen timestamp
-    await prisma.participant.update({
-      where: { id },
-      data: { 
-        lastSeenAt: new Date(),
-        isOnline: true,
-      },
+    memoryStore.updateParticipant(id, {
+      lastSeenAt: new Date(),
+      isOnline: true,
     })
 
     return NextResponse.json({ success: true })

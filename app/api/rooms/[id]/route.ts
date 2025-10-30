@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 
 export async function GET(
   req: NextRequest,
@@ -8,28 +8,7 @@ export async function GET(
   try {
     const { id } = params;
 
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: id },
-      select: {
-        id: true,
-        name: true,
-        uniqueId: true,
-        password: true,
-        createdAt: true,
-        expiresAt: true,
-        firstJoinAt: true,
-        maxUsers: true,
-        isDeleted: true,
-        participants: {
-          select: {
-            id: true,
-            displayName: true,
-            avatar: true,
-            isOnline: true,
-          },
-        },
-      },
-    });
+    const room = memoryStore.getRoomByUniqueId(id);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -46,6 +25,14 @@ export async function GET(
       );
     }
 
+    // Get participants
+    const participants = memoryStore.getParticipantsByRoomId(room.id).map(p => ({
+      id: p.id,
+      displayName: p.displayName,
+      avatar: p.avatar,
+      isOnline: p.isOnline,
+    }));
+
     return NextResponse.json({
       room: {
         id: room.id,
@@ -56,8 +43,8 @@ export async function GET(
         expiresAt: room.expiresAt,
         firstJoinAt: room.firstJoinAt,
         maxUsers: room.maxUsers,
-        participantCount: room.participants.length,
-        participants: room.participants,
+        participantCount: participants.length,
+        participants,
       },
     });
   } catch (error) {
@@ -76,19 +63,14 @@ export async function DELETE(
   try {
     const { id } = params;
 
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: id },
-    });
+    const room = memoryStore.getRoomByUniqueId(id);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
     }
 
     // Soft delete
-    await prisma.room.update({
-      where: { uniqueId: id },
-      data: { isDeleted: true },
-    });
+    memoryStore.updateRoom(room.id, { isDeleted: true });
 
     return NextResponse.json({ success: true });
   } catch (error) {

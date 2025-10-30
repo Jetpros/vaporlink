@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,31 +14,14 @@ export async function GET(req: NextRequest) {
     }
 
     // First, find the room by uniqueId (which is what we're passing)
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: roomId },
-      select: { id: true },
-    });
+    const room = memoryStore.getRoomByUniqueId(roomId);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
     }
 
     // Fetch all participants for the room using the database ID
-    const participants = await prisma.participant.findMany({
-      where: { roomId: room.id },
-      include: {
-        user: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
-      orderBy: {
-        joinedAt: "asc",
-      },
-    });
+    const participants = memoryStore.getParticipantsByRoomId(room.id);
 
     // Update online status based on lastSeenAt (consider offline if > 1 minute)
     const now = new Date();
@@ -46,7 +29,10 @@ export async function GET(req: NextRequest) {
 
     const participantsWithStatus = participants.map((p) => ({
       ...p,
+      joinedAt: p.joinedAt.toISOString(),
+      lastSeenAt: p.lastSeenAt.toISOString(),
       isOnline: new Date(p.lastSeenAt) > oneMinuteAgo,
+      user: p.userId ? memoryStore.getUserById(p.userId) : null,
     }));
 
     return NextResponse.json({

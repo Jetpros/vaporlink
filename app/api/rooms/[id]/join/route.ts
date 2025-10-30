@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { memoryStore } from "@/lib/memory-store";
 import { generateGuestName, generateAvatarUrl } from "@/lib/utils";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
@@ -20,12 +20,7 @@ export async function POST(
     const { displayName, avatar, password } = joinRoomSchema.parse(body);
 
     // Find room
-    const room = await prisma.room.findUnique({
-      where: { uniqueId: id },
-      include: {
-        participants: true,
-      },
-    });
+    const room = memoryStore.getRoomByUniqueId(id);
 
     if (!room) {
       return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -43,7 +38,8 @@ export async function POST(
     }
 
     // Check if room is full
-    if (room.participants.length >= room.maxUsers) {
+    const participants = memoryStore.getParticipantsByRoomId(room.id);
+    if (participants.length >= room.maxUsers) {
       return NextResponse.json({ error: "Room is full" }, { status: 400 });
     }
 
@@ -70,12 +66,11 @@ export async function POST(
     const finalAvatar = avatar || generateAvatarUrl(finalDisplayName);
 
     // Create participant
-    const participant = await prisma.participant.create({
-      data: {
-        roomId: room.id,
-        displayName: finalDisplayName,
-        avatar: finalAvatar,
-      },
+    const participant = memoryStore.createParticipant({
+      roomId: room.id,
+      displayName: finalDisplayName,
+      avatar: finalAvatar,
+      isOnline: true,
     });
 
     // Update firstJoinAt and expiresAt if this is the first participant
@@ -85,13 +80,18 @@ export async function POST(
         now.getTime() + room.durationHours * 60 * 60 * 1000
       );
 
-      await prisma.room.update({
-        where: { id: room.id },
-        data: {
-          firstJoinAt: now,
-          expiresAt: actualExpiresAt,
-        },
+      memoryStore.updateRoom(room.id, {
+        firstJoinAt: now,
+        expiresAt: actualExpiresAt,
       });
+    }
+
+    // Broadcast participant join via Socket.IO using uniqueId (not internal id)
+    const { getSocketServer } = await import('@/server/socket-server');
+    const socketServer = getSocketServer();
+    if (socketServer) {
+      console.log(`📡 Broadcasting participant join to room: ${room.uniqueId}`);
+      socketServer.broadcastParticipantJoin(room.uniqueId, participant);
     }
 
     return NextResponse.json({

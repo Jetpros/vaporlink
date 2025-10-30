@@ -130,6 +130,9 @@ export default function ChatRoomPage() {
         JSON.stringify(session)
       );
 
+      // Refresh room data to get updated firstJoinAt and expiresAt
+      await fetchRoomData();
+
       setParticipantId(data.participant.id);
       setHasJoined(true);
     } catch (error: any) {

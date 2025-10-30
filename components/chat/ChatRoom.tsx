@@ -4,7 +4,6 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Send,
   Phone,
@@ -14,13 +13,12 @@ import {
   X,
   Reply,
   ArrowDown,
-  FileText,
   Bell,
   BellOff,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useNotifications } from "@/hooks/use-notifications";
-import { useRealtime } from "@/hooks/use-realtime";
+import { useSocket } from "@/hooks/use-socket";
 import { formatTimeLeft } from "@/lib/utils";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
@@ -52,12 +50,12 @@ export default function ChatRoom({
     showMessageNotification,
   } = useNotifications();
 
-  // Supabase Realtime
+  // Socket.IO Realtime
   const {
     isConnected,
     isSupported: isRealtimeSupported,
     broadcastTyping,
-  } = useRealtime({
+  } = useSocket({
     roomId,
     participantId,
     enabled: true,
@@ -66,11 +64,25 @@ export default function ChatRoom({
         console.log("🆕 Realtime: New message received via WebSocket", message);
         console.log("🆕 Message ID:", message.id);
         console.log("🆕 Message content:", message.content);
-        console.log("🆕 Message roomId:", message.roomId);
-        
-        // Refetch to get full message with user relations and reactions
-        // This is necessary because realtime only sends the raw row data
-        fetchMessages();
+        console.log("🆕 Message userId:", message.userId);
+        console.log("🆕 Current participantId:", participantId);
+
+        // Skip messages from current user - we handle those optimistically
+        if (message.userId === participantId) {
+          console.log("⚠️ Skipping own message - handled optimistically");
+          return;
+        }
+
+        // Add message directly to state for instant display
+        setMessages((prev) => {
+          // Avoid duplicates
+          if (prev.find((m) => m.id === message.id)) {
+            console.log("⚠️ Message already exists, skipping");
+            return prev;
+          }
+          console.log("✅ Adding new message from other user to UI");
+          return [...prev, message];
+        });
       },
       onMessageUpdate: (message) => {
         console.log("📝 Realtime: Message updated", message);
@@ -85,7 +97,7 @@ export default function ChatRoom({
         console.log("👤 Realtime: Participant joined", participant);
         console.log("👤 Participant ID:", participant.id);
         console.log("👤 Display name:", participant.displayName);
-        
+
         // Add to UI immediately
         setParticipants((prev) => {
           if (prev.find((p) => p.id === participant.id)) {
@@ -93,6 +105,16 @@ export default function ChatRoom({
             return prev;
           }
           console.log("✅ Adding new participant to UI");
+
+          // Show toast notification (only if not the current user)
+          if (participant.id !== participantId) {
+            toast({
+              title: `${participant.displayName} joined the room`,
+              description: "Say hello! 👋",
+              duration: 4000,
+            });
+          }
+
           return [...prev, participant];
         });
       },
@@ -101,8 +123,8 @@ export default function ChatRoom({
         // Update in UI immediately
         setParticipants((prev) =>
           prev.map((p) =>
-            p.id === participant.id ? { ...p, ...participant } : p,
-          ),
+            p.id === participant.id ? { ...p, ...participant } : p
+          )
         );
       },
       onParticipantLeave: (participantId) => {
@@ -174,7 +196,7 @@ export default function ChatRoom({
       textareaRef.current.style.height = "auto";
       textareaRef.current.style.height = `${Math.min(
         textareaRef.current.scrollHeight,
-        144,
+        144
       )}px`;
     }
   }, [message]);
@@ -229,7 +251,7 @@ export default function ChatRoom({
         showMessageNotification(
           msg.user?.displayName || "Someone",
           msg.content || "",
-          msg.type,
+          msg.type
         );
       }
     });
@@ -257,7 +279,7 @@ export default function ChatRoom({
     }
 
     console.log(
-      "⚠️ Supabase realtime not available, using 2s polling as fallback",
+      "⚠️ Supabase realtime not available, using 2s polling as fallback"
     );
 
     const interval = setInterval(() => {
@@ -271,7 +293,7 @@ export default function ChatRoom({
     };
   }, [roomId, isRealtimeSupported, isConnected]);
 
-  // Update participant's last seen on activity
+  // Update participant's last seen on activity (reduced frequency)
   useEffect(() => {
     const updateLastSeen = async () => {
       try {
@@ -283,8 +305,8 @@ export default function ChatRoom({
           prev.map((p) =>
             p.id === participantId
               ? { ...p, lastSeenAt: new Date().toISOString(), isOnline: true }
-              : p,
-          ),
+              : p
+          )
         );
       } catch (error) {
         console.error("Error updating last seen:", error);
@@ -294,8 +316,8 @@ export default function ChatRoom({
     // Update immediately on mount
     updateLastSeen();
 
-    // Update last seen every 10 seconds (more frequent for better online status)
-    const lastSeenInterval = setInterval(updateLastSeen, 10000);
+    // Update last seen every 60 seconds (reduced from 10s)
+    const lastSeenInterval = setInterval(updateLastSeen, 60000);
 
     return () => clearInterval(lastSeenInterval);
   }, [participantId]);
@@ -355,12 +377,19 @@ export default function ChatRoom({
         console.log(
           "✅ Messages loaded:",
           data.messages?.length || 0,
-          "messages",
+          "messages"
         );
         if (data.messages) {
           console.log("Last message:", data.messages[data.messages.length - 1]);
         }
-        setMessages(data.messages || []);
+
+        // Ensure all fetched messages have status: 'sent'
+        const messagesWithStatus = (data.messages || []).map((msg: any) => ({
+          ...msg,
+          status: msg.status || "sent", // Default to 'sent' for existing messages
+        }));
+
+        setMessages(messagesWithStatus);
       } else {
         console.error("❌ Failed to fetch messages:", response.statusText);
         const errorText = await response.text();
@@ -381,7 +410,7 @@ export default function ChatRoom({
         console.log(
           "Participants data:",
           data.participants?.length || 0,
-          "participants",
+          "participants"
         );
         setParticipants(data.participants || []);
       } else {
@@ -395,7 +424,7 @@ export default function ChatRoom({
   const handleSendMessage = async (
     content?: string,
     type: string = "text",
-    fileData?: any,
+    fileData?: any
   ) => {
     const messageContent = content || message.trim();
     if (!messageContent && !fileData) return;
@@ -423,7 +452,7 @@ export default function ChatRoom({
       },
       reactions: [],
       replyTo: replyingTo || null,
-      isOptimistic: true,
+      status: "pending", // pending, sent
     };
 
     console.log("📤 Sending message:", messageContent);
@@ -480,24 +509,36 @@ export default function ChatRoom({
       const responseData = await response.json();
       console.log("✅ Message sent successfully:", responseData);
 
+      // Update the optimistic message with real data and mark as sent
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === optimisticMessage.id
+            ? {
+                ...responseData.message,
+                status: "sent", // Mark as successfully sent
+              }
+            : msg
+        )
+      );
+
       // Stop typing broadcast when message is sent
       broadcastTyping(
         false,
         currentParticipant?.displayName,
-        currentParticipant?.avatar,
+        currentParticipant?.avatar
       );
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
-
-      // Refetch to replace optimistic message with real one
-      console.log("🔄 Refetching messages to get real data...");
-      await fetchMessages();
     } catch (error: any) {
       console.error("❌ Error sending message:", error);
 
-      // Remove optimistic message on error
-      setMessages((prev) => prev.filter((m) => m.id !== optimisticMessage.id));
+      // Mark optimistic message as failed instead of removing it
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === optimisticMessage.id ? { ...msg, status: "failed" } : msg
+        )
+      );
 
       toast({
         title: "Error",
@@ -509,35 +550,308 @@ export default function ChatRoom({
 
   const handleFileSelect = async (
     file: File,
-    type: "image" | "video" | "file" | "audio",
+    type: "image" | "video" | "file" | "audio"
   ) => {
     console.log("📎 File selected:", file.name, "Type:", type);
 
-    // If user explicitly selected Photo/Video/Audio, send directly as inline media
+    // If user explicitly selected Photo/Video/Audio, show optimistic message immediately
     if (type === "image" || type === "video" || type === "audio") {
-      console.log("📸 Sending as inline media:", type);
-      setUploadingFile(true);
+      console.log("📸 Showing optimistic media message immediately");
 
+      // Create local preview URL
+      const localUrl = URL.createObjectURL(file);
+
+      // Get media dimensions before showing the message to prevent size jumping
+      let mediaDimensions: { width?: number; height?: number } = {};
+
+      if (type === "image") {
+        // Load image to get dimensions
+        const img = new Image();
+        img.src = localUrl;
+        await new Promise<void>((resolve) => {
+          img.onload = () => {
+            mediaDimensions = {
+              width: img.naturalWidth,
+              height: img.naturalHeight,
+            };
+            console.log(`📐 Calculated image dimensions:`, mediaDimensions);
+            resolve();
+          };
+          img.onerror = () => {
+            console.log(`❌ Failed to load image for dimensions`);
+            resolve();
+          };
+          // Timeout fallback
+          setTimeout(() => {
+            console.log(
+              `⏱️ Dimension calculation timeout, using:`,
+              mediaDimensions
+            );
+            resolve();
+          }, 1000);
+        });
+      } else if (type === "video") {
+        // Load video to get dimensions
+        const video = document.createElement("video");
+        video.src = localUrl;
+        await new Promise<void>((resolve) => {
+          video.onloadedmetadata = () => {
+            mediaDimensions = {
+              width: video.videoWidth,
+              height: video.videoHeight,
+            };
+            console.log(`📐 Calculated video dimensions:`, mediaDimensions);
+            resolve();
+          };
+          video.onerror = () => {
+            console.log(`❌ Failed to load video for dimensions`);
+            resolve();
+          };
+          // Timeout fallback
+          setTimeout(() => {
+            console.log(
+              `⏱️ Dimension calculation timeout, using:`,
+              mediaDimensions
+            );
+            resolve();
+          }, 1000);
+        });
+      }
+
+      // Get current participant for optimistic update
+      const currentParticipant = participants.find(
+        (p) => p.id === participantId
+      );
+
+      // Create optimistic message with upload progress and dimensions
+      const optimisticMessage = {
+        id: `temp-${Date.now()}`,
+        roomId,
+        userId: participantId,
+        content: "",
+        type,
+        fileUrl: localUrl, // Local preview URL initially
+        fileName: file.name,
+        fileSize: file.size,
+        duration: null,
+        createdAt: new Date().toISOString(),
+        replyToId: null,
+        user: currentParticipant || {
+          id: participantId,
+          displayName: "You",
+          avatar: "",
+        },
+        reactions: [],
+        replyTo: null,
+        status: "uploading", // uploading, sent, failed
+        uploadProgress: 0, // 0-100
+        mediaWidth: mediaDimensions.width,
+        mediaHeight: mediaDimensions.height,
+      };
+
+      console.log("📤 Showing optimistic message:", optimisticMessage);
+
+      // Immediately add optimistic message to UI
+      setMessages((prev) => [...prev, optimisticMessage]);
+
+      // Scroll to bottom immediately
+      shouldAutoScrollRef.current = true;
+      setUserScrolled(false);
+
+      // Upload in background
       try {
-        const base64 = await fileToBase64(file);
-        await handleSendMessage("", type, {
-          url: base64,
-          name: file.name,
-          size: file.size,
+        // Upload to Cloudinary with progress tracking
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("folder", "vaporlink");
+
+        const xhr = new XMLHttpRequest();
+
+        // Track upload progress
+        xhr.upload.addEventListener("progress", (e) => {
+          if (e.lengthComputable) {
+            const progress = Math.round((e.loaded / e.total) * 100);
+            console.log(`📊 Upload progress: ${progress}%`);
+
+            // Update progress in the optimistic message
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === optimisticMessage.id
+                  ? { ...msg, uploadProgress: progress }
+                  : msg
+              )
+            );
+          }
         });
 
-        toast({
-          title: "Success",
-          description: `${type.charAt(0).toUpperCase() + type.slice(1)} sent successfully`,
+        xhr.addEventListener("load", async () => {
+          if (xhr.status === 200) {
+            const uploadResult = JSON.parse(xhr.responseText);
+            console.log("✅ File uploaded to Cloudinary:", uploadResult.url);
+
+            // Send the message to server now that upload is complete
+            try {
+              const response = await fetch("/api/messages", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  roomId,
+                  participantId,
+                  content: "",
+                  type,
+                  fileUrl: uploadResult.url,
+                  fileName: file.name,
+                  fileSize: file.size,
+                  publicId: uploadResult.publicId,
+                  mediaWidth: mediaDimensions.width,
+                  mediaHeight: mediaDimensions.height,
+                }),
+              });
+
+              if (!response.ok) {
+                throw new Error("Failed to send message");
+              }
+
+              const responseData = await response.json();
+              console.log("✅ Message sent successfully:", responseData);
+
+              // For images/videos, preload the Cloudinary URL before replacing
+              if (type === "image" || type === "video") {
+                const preloadElement =
+                  type === "image"
+                    ? new Image()
+                    : document.createElement("video");
+
+                // Wait for the Cloudinary media to fully load
+                await new Promise<void>((resolve) => {
+                  if (type === "image") {
+                    (preloadElement as HTMLImageElement).onload = () =>
+                      resolve();
+                    (preloadElement as HTMLImageElement).onerror = () =>
+                      resolve(); // Resolve anyway to not block
+                    (preloadElement as HTMLImageElement).src = uploadResult.url;
+                  } else {
+                    (preloadElement as HTMLVideoElement).onloadeddata = () =>
+                      resolve();
+                    (preloadElement as HTMLVideoElement).onerror = () =>
+                      resolve();
+                    (preloadElement as HTMLVideoElement).src = uploadResult.url;
+                  }
+
+                  // Timeout fallback - don't wait forever
+                  setTimeout(() => resolve(), 3000);
+                });
+              }
+
+              // Now update the message - the new URL is already loaded, so no flicker
+              // Preserve the original dimensions to prevent size jumping
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === optimisticMessage.id
+                    ? {
+                        ...responseData.message,
+                        status: "sent", // Mark as successfully sent
+                        mediaWidth: msg.mediaWidth, // Preserve original dimensions
+                        mediaHeight: msg.mediaHeight,
+                      }
+                    : msg
+                )
+              );
+
+              // Clean up local blob URL after a small delay to ensure smooth transition
+              setTimeout(() => {
+                if (localUrl.startsWith("blob:")) {
+                  console.log(`🧹 Cleaning up local blob URL:`, localUrl);
+                  URL.revokeObjectURL(localUrl);
+                  console.log(`✅ Blob URL revoked successfully`);
+                }
+              }, 100);
+
+              toast({
+                title: "Success",
+                description: `${
+                  type.charAt(0).toUpperCase() + type.slice(1)
+                } sent successfully`,
+              });
+            } catch (sendError: any) {
+              console.error("❌ Error sending message:", sendError);
+
+              // Mark message as failed
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === optimisticMessage.id
+                    ? { ...msg, status: "failed" }
+                    : msg
+                )
+              );
+
+              toast({
+                title: "Error",
+                description: sendError.message || "Failed to send message",
+                variant: "destructive",
+              });
+            }
+          } else {
+            console.error("❌ Upload failed with status:", xhr.status);
+
+            // Mark message as failed
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === optimisticMessage.id
+                  ? { ...msg, status: "failed" }
+                  : msg
+              )
+            );
+
+            toast({
+              title: "Error",
+              description: `Failed to upload ${type}`,
+              variant: "destructive",
+            });
+          }
         });
+
+        xhr.addEventListener("error", () => {
+          console.error("❌ Upload failed");
+
+          // Mark message as failed
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === optimisticMessage.id
+                ? { ...msg, status: "failed" }
+                : msg
+            )
+          );
+
+          // Clean up local blob URL even on failure
+          if (localUrl.startsWith("blob:")) {
+            URL.revokeObjectURL(localUrl);
+          }
+
+          toast({
+            title: "Error",
+            description: `Failed to upload ${type}`,
+            variant: "destructive",
+          });
+        });
+
+        xhr.open("POST", "/api/upload");
+        xhr.send(formData);
       } catch (error: any) {
+        console.error("❌ Error starting upload:", error);
+
+        // Mark message as failed
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === optimisticMessage.id ? { ...msg, status: "failed" } : msg
+          )
+        );
+
         toast({
           title: "Error",
-          description: error.message || `Failed to send ${type}`,
+          description: error.message || `Failed to upload ${type}`,
           variant: "destructive",
         });
-      } finally {
-        setUploadingFile(false);
       }
     } else {
       // If user selected "File", show modal (even for images/videos/audio)
@@ -577,15 +891,38 @@ export default function ChatRoom({
       // Get the first file's caption (shared caption for all files)
       const sharedCaption = files[0]?.caption || "";
 
-      // Convert all files to base64
-      const fileDataArray = await Promise.all(
-        files.map(async (filePreview) => ({
-          url: await fileToBase64(filePreview.file),
+      // Upload all files to Cloudinary
+      const uploadPromises = files.map(async (filePreview) => {
+        const formData = new FormData();
+        formData.append("file", filePreview.file);
+        formData.append("folder", "vaporlink");
+
+        const uploadResponse = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`Failed to upload ${filePreview.file.name}`);
+        }
+
+        const uploadResult = await uploadResponse.json();
+        console.log(
+          "✅ File uploaded to Cloudinary:",
+          filePreview.file.name,
+          uploadResult.url
+        );
+
+        return {
+          url: uploadResult.url,
           name: filePreview.file.name,
           size: filePreview.file.size,
           type: filePreview.type,
-        })),
-      );
+          publicId: uploadResult.publicId,
+        };
+      });
+
+      const fileDataArray = await Promise.all(uploadPromises);
 
       // Send as a single message with multiple files
       await handleSendMessage(sharedCaption, "files", {
@@ -620,31 +957,208 @@ export default function ChatRoom({
 
   const handleVoiceRecording = async (audioBlob: Blob, duration: number) => {
     setIsRecordingVoice(false);
-    setUploadingFile(true);
 
+    console.log("🎤 Processing voice recording:", {
+      size: audioBlob.size,
+      duration,
+    });
+
+    // Create local preview URL
+    const localUrl = URL.createObjectURL(audioBlob);
+
+    // Get current participant for optimistic update
+    const currentParticipant = participants.find((p) => p.id === participantId);
+
+    // Convert blob to file
+    const audioFile = new File([audioBlob], `voice-${Date.now()}.webm`, {
+      type: "audio/webm",
+    });
+
+    // Create optimistic message with upload progress
+    const optimisticMessage = {
+      id: `temp-${Date.now()}`,
+      roomId,
+      userId: participantId,
+      content: "",
+      type: "voice",
+      fileUrl: localUrl, // Local preview URL initially
+      fileName: audioFile.name,
+      fileSize: audioBlob.size,
+      duration,
+      createdAt: new Date().toISOString(),
+      replyToId: null,
+      user: currentParticipant || {
+        id: participantId,
+        displayName: "You",
+        avatar: "",
+      },
+      reactions: [],
+      replyTo: null,
+      status: "uploading", // uploading, sent, failed
+      uploadProgress: 0, // 0-100
+    };
+
+    console.log("🎤 Showing optimistic voice message:", optimisticMessage);
+
+    // Immediately add optimistic message to UI
+    setMessages((prev) => [...prev, optimisticMessage]);
+
+    // Scroll to bottom immediately
+    shouldAutoScrollRef.current = true;
+    setUserScrolled(false);
+
+    // Upload in background
     try {
-      // Convert blob to base64
-      const base64 = await blobToBase64(audioBlob);
+      // Upload to Cloudinary with progress tracking
+      const formData = new FormData();
+      formData.append("file", audioFile);
+      formData.append("folder", "vaporlink");
 
-      await handleSendMessage("", "voice", {
-        url: base64,
-        name: `voice-${Date.now()}.webm`,
-        size: audioBlob.size,
-        duration,
+      const xhr = new XMLHttpRequest();
+
+      // Track upload progress
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) {
+          const progress = Math.round((e.loaded / e.total) * 100);
+          console.log(`📊 Voice upload progress: ${progress}%`);
+
+          // Update progress in the optimistic message
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === optimisticMessage.id
+                ? { ...msg, uploadProgress: progress }
+                : msg
+            )
+          );
+        }
       });
 
-      toast({
-        title: "Success",
-        description: "Voice message sent",
+      xhr.addEventListener("load", async () => {
+        if (xhr.status === 200) {
+          const uploadResult = JSON.parse(xhr.responseText);
+          console.log("✅ Voice uploaded to Cloudinary:", uploadResult.url);
+
+          // Send the message to server now that upload is complete
+          try {
+            const response = await fetch("/api/messages", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                roomId,
+                participantId,
+                content: "",
+                type: "voice",
+                fileUrl: uploadResult.url,
+                fileName: audioFile.name,
+                fileSize: audioBlob.size,
+                duration,
+                publicId: uploadResult.publicId,
+              }),
+            });
+
+            if (!response.ok) {
+              throw new Error("Failed to send message");
+            }
+
+            const responseData = await response.json();
+            console.log("✅ Voice message sent successfully:", responseData);
+
+            // Preload the Cloudinary audio before replacing
+            const preloadAudio = new Audio();
+            await new Promise<void>((resolve) => {
+              preloadAudio.oncanplaythrough = () => resolve();
+              preloadAudio.onerror = () => resolve(); // Resolve anyway to not block
+              preloadAudio.src = uploadResult.url;
+
+              // Timeout fallback - don't wait forever
+              setTimeout(() => resolve(), 3000);
+            });
+
+            // Now update the message - the new URL is already loaded, so no flicker
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === optimisticMessage.id
+                  ? {
+                      ...responseData.message,
+                      status: "sent", // Mark as successfully sent
+                    }
+                  : msg
+              )
+            );
+
+            // Clean up local blob URL after a small delay to ensure smooth transition
+            setTimeout(() => {
+              if (localUrl.startsWith("blob:")) {
+                URL.revokeObjectURL(localUrl);
+              }
+            }, 100);
+
+            toast({
+              title: "Success",
+              description: "Voice message sent",
+            });
+          } catch (sendError: any) {
+            console.error("❌ Error sending voice message:", sendError);
+
+            // Mark message as failed
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === optimisticMessage.id
+                  ? { ...msg, status: "failed" }
+                  : msg
+              )
+            );
+
+            toast({
+              title: "Error",
+              description: sendError.message || "Failed to send voice message",
+              variant: "destructive",
+            });
+          }
+        } else {
+          throw new Error("Upload failed");
+        }
       });
+
+      xhr.addEventListener("error", () => {
+        console.error("❌ Voice upload failed");
+
+        // Mark message as failed
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === optimisticMessage.id ? { ...msg, status: "failed" } : msg
+          )
+        );
+
+        // Clean up local blob URL even on failure
+        if (localUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(localUrl);
+        }
+
+        toast({
+          title: "Error",
+          description: "Failed to upload voice message",
+          variant: "destructive",
+        });
+      });
+
+      xhr.open("POST", "/api/upload");
+      xhr.send(formData);
     } catch (error: any) {
+      console.error("❌ Error starting voice upload:", error);
+
+      // Mark message as failed
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === optimisticMessage.id ? { ...msg, status: "failed" } : msg
+        )
+      );
+
       toast({
         title: "Error",
-        description: error.message || "Failed to send voice message",
+        description: error.message || "Failed to upload voice message",
         variant: "destructive",
       });
-    } finally {
-      setUploadingFile(false);
     }
   };
 
@@ -684,23 +1198,7 @@ export default function ChatRoom({
   };
 
   // Helper functions
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const blobToBase64 = (blob: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  };
+  // Note: fileToBase64 and blobToBase64 removed - now using Cloudinary uploads
 
   // Group consecutive messages from the same user
   const groupedMessages = messages.reduce((groups: any[], msg, index) => {
@@ -1022,7 +1520,6 @@ export default function ChatRoom({
                   ref={(el) => {
                     if (el) messageRefs.current[msg.id] = el;
                   }}
-                  className={msg.isOptimistic ? "opacity-70" : ""}
                 >
                   <MessageBubble
                     message={msg}
@@ -1039,12 +1536,6 @@ export default function ChatRoom({
                     onReplyClick={scrollToMessage}
                     isHighlighted={highlightedMessageId === msg.id}
                   />
-                  {msg.isOptimistic && (
-                    <div className="flex items-center justify-end gap-1 px-2 text-xs text-gray-400">
-                      <div className="w-1 h-1 bg-gray-400 rounded-full animate-pulse" />
-                      <span>Sending...</span>
-                    </div>
-                  )}
                 </div>
               ))}
 
@@ -1138,12 +1629,12 @@ export default function ChatRoom({
                       if (e.target.value.trim()) {
                         // Find current participant info
                         const currentParticipant = participants.find(
-                          (p) => p.id === participantId,
+                          (p) => p.id === participantId
                         );
                         broadcastTyping(
                           true,
                           currentParticipant?.displayName,
-                          currentParticipant?.avatar,
+                          currentParticipant?.avatar
                         );
 
                         // Clear previous timeout
@@ -1151,25 +1642,25 @@ export default function ChatRoom({
                           clearTimeout(typingTimeoutRef.current);
                         }
 
-                        // Set timeout to stop typing after 2 seconds of inactivity
+                        // Set timeout to stop typing after 5 seconds of inactivity
                         typingTimeoutRef.current = setTimeout(() => {
                           const currentParticipant = participants.find(
-                            (p) => p.id === participantId,
+                            (p) => p.id === participantId
                           );
                           broadcastTyping(
                             false,
                             currentParticipant?.displayName,
-                            currentParticipant?.avatar,
+                            currentParticipant?.avatar
                           );
-                        }, 2000);
+                        }, 5000);
                       } else {
                         const currentParticipant = participants.find(
-                          (p) => p.id === participantId,
+                          (p) => p.id === participantId
                         );
                         broadcastTyping(
                           false,
                           currentParticipant?.displayName,
-                          currentParticipant?.avatar,
+                          currentParticipant?.avatar
                         );
                       }
                     }}
@@ -1179,12 +1670,12 @@ export default function ChatRoom({
                         handleSendMessage();
                         // Stop typing broadcast when message is sent
                         const currentParticipant = participants.find(
-                          (p) => p.id === participantId,
+                          (p) => p.id === participantId
                         );
                         broadcastTyping(
                           false,
                           currentParticipant?.displayName,
-                          currentParticipant?.avatar,
+                          currentParticipant?.avatar
                         );
                         if (typingTimeoutRef.current) {
                           clearTimeout(typingTimeoutRef.current);
