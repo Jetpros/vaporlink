@@ -248,5 +248,6 @@ export function useSocket({
     isSupported,
     broadcastTyping,
     broadcast,
+    socket: socketRef.current,
   };
 }

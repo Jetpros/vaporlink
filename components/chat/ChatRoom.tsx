@@ -19,6 +19,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useNotifications } from "@/hooks/use-notifications";
 import { useSocket } from "@/hooks/use-socket";
+import { useCall } from "@/hooks/use-call";
 import { formatTimeLeft } from "@/lib/utils";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
@@ -29,6 +30,10 @@ import VoiceRecorder from "./VoiceRecorder";
 import CountdownTimer from "./CountdownTimer";
 import ExpiredRoomModal from "./ExpiredRoomModal";
 import FileUploadModal from "./FileUploadModal";
+import CallButton from "./CallButton";
+import IncomingCallModal from "./IncomingCallModal";
+import CallIndicator from "./CallIndicator";
+import CallInterface from "./CallInterface";
 
 interface ChatRoomProps {
   roomId: string;
@@ -55,6 +60,7 @@ export default function ChatRoom({
     isConnected,
     isSupported: isRealtimeSupported,
     broadcastTyping,
+    socket,
   } = useSocket({
     roomId,
     participantId,
@@ -189,6 +195,99 @@ export default function ChatRoom({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const previousMessagesRef = useRef<any[]>([]);
   const [showNotificationPrompt, setShowNotificationPrompt] = useState(false);
+
+  // Call Management State
+  const [showIncomingCallModal, setShowIncomingCallModal] = useState(false);
+  const [incomingCallData, setIncomingCallData] = useState<{
+    callId: string;
+    initiator: { id: string; displayName: string; avatar: string };
+  } | null>(null);
+
+  // Get current participant info for call
+  const currentParticipant = participants.find((p) => p.id === participantId) || {
+    displayName: roomData.participants?.find((p: any) => p.id === participantId)?.displayName || "You",
+    avatar: roomData.participants?.find((p: any) => p.id === participantId)?.avatar || "",
+  };
+
+  // Call Hook
+  const {
+    callState,
+    startCall,
+    acceptCall,
+    declineCall,
+    joinCall,
+    leaveCall,
+    toggleAudio,
+    toggleVideo,
+  } = useCall({
+    socket,
+    roomId,
+    participantId,
+    currentParticipant: {
+      displayName: currentParticipant.displayName,
+      avatar: currentParticipant.avatar,
+    },
+    onIncomingCall: (callId, initiator) => {
+      console.log("📞 Incoming call from:", initiator.displayName);
+      setIncomingCallData({ callId, initiator });
+      setShowIncomingCallModal(true);
+    },
+    onCallEnded: () => {
+      console.log("📞 Call ended");
+      toast({
+        title: "Call Ended",
+        description: "The call has ended",
+      });
+    },
+  });
+
+  // Call Handlers
+  const handleStartCall = async () => {
+    console.log("📞 handleStartCall clicked!");
+    console.log("📞 Socket connected:", isConnected);
+    console.log("📞 Socket instance:", socket);
+    console.log("📞 Current call state:", callState);
+    
+    const result = await startCall();
+    console.log("📞 startCall result:", result);
+    
+    if (!result.success) {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to start call",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleAcceptCall = async () => {
+    setShowIncomingCallModal(false);
+    const result = await acceptCall();
+    if (!result.success) {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to join call",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDeclineCall = () => {
+    setShowIncomingCallModal(false);
+    declineCall();
+  };
+
+  const handleJoinCall = async () => {
+    if (!callState.callId) return;
+    const result = await joinCall(callState.callId);
+    if (!result.success) {
+      toast({
+        title: "Error",
+        description: result.error || "Failed to join call",
+        variant: "destructive",
+      });
+    }
+  };
 
   // Auto-resize textarea based on message content
   useEffect(() => {
@@ -1372,9 +1471,11 @@ export default function ChatRoom({
               <Button variant="ghost" size="icon" className="rounded-full">
                 <Search className="w-5 h-5 text-gray-600" />
               </Button>
-              <Button variant="ghost" size="icon" className="rounded-full">
-                <Phone className="w-5 h-5 text-gray-600" />
-              </Button>
+              <CallButton
+                onStartCall={handleStartCall}
+                disabled={!isConnected}
+                isCallActive={callState.status === 'active' || callState.status === 'ringing'}
+              />
               <Button variant="ghost" size="icon" className="rounded-full">
                 <MoreVertical className="w-5 h-5 text-gray-600" />
               </Button>
@@ -1785,6 +1886,41 @@ export default function ChatRoom({
         onAddMore={handleAddMoreFiles}
         onFilesChange={setFilePreviews}
       />
+
+      {/* Call Indicator - Shows when call is active */}
+      <CallIndicator
+        isVisible={
+          callState.callId !== null &&
+          callState.status !== 'idle' &&
+          callState.status !== 'ended'
+        }
+        participantCount={callState.participants.length}
+        isUserInCall={callState.status === 'active'}
+        onJoinCall={handleJoinCall}
+        callStartTime={callState.callId ? new Date() : undefined}
+      />
+
+      {/* Incoming Call Modal */}
+      {incomingCallData && (
+        <IncomingCallModal
+          isOpen={showIncomingCallModal}
+          callerName={incomingCallData.initiator.displayName}
+          callerAvatar={incomingCallData.initiator.avatar}
+          onAccept={handleAcceptCall}
+          onDecline={handleDeclineCall}
+        />
+      )}
+
+      {/* Call Interface - Full screen when user is in call */}
+      {callState.status === 'active' && (
+        <CallInterface
+          roomUrl={callState.roomUrl}
+          currentParticipantId={participantId}
+          onLeaveCall={leaveCall}
+          onToggleAudio={toggleAudio}
+          onToggleVideo={toggleVideo}
+        />
+      )}
     </div>
   );
 }

@@ -83,6 +83,27 @@ export interface RateLimit {
   createdAt: Date;
 }
 
+export interface Call {
+  id: string;
+  roomId: string;
+  initiatorId: string; // participant who started the call
+  startedAt: Date;
+  endedAt?: Date;
+  status: 'ringing' | 'active' | 'ended';
+  dailyRoomUrl?: string; // Daily.co room URL (if using Daily)
+}
+
+export interface CallParticipant {
+  id: string;
+  callId: string;
+  participantId: string;
+  joinedAt: Date;
+  leftAt?: Date;
+  status: 'ringing' | 'declined' | 'joined' | 'left';
+  isMuted: boolean;
+  isVideoEnabled: boolean;
+}
+
 // In-Memory Storage
 class MemoryStore {
   private rooms = new Map<string, Room>();
@@ -92,6 +113,8 @@ class MemoryStore {
   private participants = new Map<string, Participant>();
   private reactions = new Map<string, Reaction>();
   private rateLimits = new Map<string, RateLimit>();
+  private calls = new Map<string, Call>();
+  private callParticipants = new Map<string, CallParticipant>();
 
   // Room Operations
   createRoom(data: Omit<Room, "id">): Room {
@@ -397,6 +420,105 @@ class MemoryStore {
     return deleted;
   }
 
+  // Call Operations
+  createCall(data: Omit<Call, "id" | "startedAt">): Call {
+    const call: Call = {
+      id: nanoid(),
+      startedAt: new Date(),
+      ...data,
+    };
+    this.calls.set(call.id, call);
+    console.log(`📞 Call created: ${call.id} in room ${call.roomId}`);
+    return call;
+  }
+
+  getCallById(id: string): Call | undefined {
+    return this.calls.get(id);
+  }
+
+  getActiveCallByRoomId(roomId: string): Call | undefined {
+    return Array.from(this.calls.values()).find(
+      (call) => call.roomId === roomId && call.status !== 'ended'
+    );
+  }
+
+  getAllCallsByRoomId(roomId: string): Call[] {
+    return Array.from(this.calls.values())
+      .filter((call) => call.roomId === roomId)
+      .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+  }
+
+  updateCall(id: string, data: Partial<Call>): Call | undefined {
+    const call = this.calls.get(id);
+    if (!call) return undefined;
+
+    const updated = { ...call, ...data };
+    this.calls.set(id, updated);
+    return updated;
+  }
+
+  deleteCall(id: string): boolean {
+    // Also delete related call participants
+    this.deleteCallParticipantsByCallId(id);
+    return this.calls.delete(id);
+  }
+
+  // Call Participant Operations
+  createCallParticipant(
+    data: Omit<CallParticipant, "id" | "joinedAt">
+  ): CallParticipant {
+    const callParticipant: CallParticipant = {
+      id: nanoid(),
+      joinedAt: new Date(),
+      ...data,
+    };
+    this.callParticipants.set(callParticipant.id, callParticipant);
+    console.log(
+      `📞 Call participant created: ${callParticipant.participantId} in call ${callParticipant.callId}`
+    );
+    return callParticipant;
+  }
+
+  getCallParticipantById(id: string): CallParticipant | undefined {
+    return this.callParticipants.get(id);
+  }
+
+  getCallParticipantsByCallId(callId: string): CallParticipant[] {
+    return Array.from(this.callParticipants.values())
+      .filter((cp) => cp.callId === callId)
+      .sort((a, b) => a.joinedAt.getTime() - b.joinedAt.getTime());
+  }
+
+  getCallParticipantByCallAndParticipant(
+    callId: string,
+    participantId: string
+  ): CallParticipant | undefined {
+    return Array.from(this.callParticipants.values()).find(
+      (cp) => cp.callId === callId && cp.participantId === participantId
+    );
+  }
+
+  updateCallParticipant(
+    id: string,
+    data: Partial<CallParticipant>
+  ): CallParticipant | undefined {
+    const callParticipant = this.callParticipants.get(id);
+    if (!callParticipant) return undefined;
+
+    const updated = { ...callParticipant, ...data };
+    this.callParticipants.set(id, updated);
+    return updated;
+  }
+
+  deleteCallParticipant(id: string): boolean {
+    return this.callParticipants.delete(id);
+  }
+
+  deleteCallParticipantsByCallId(callId: string): void {
+    const callParticipants = this.getCallParticipantsByCallId(callId);
+    callParticipants.forEach((cp) => this.callParticipants.delete(cp.id));
+  }
+
   // Cleanup Operations
   cleanupExpiredRooms(): number {
     const now = new Date();
@@ -422,6 +544,8 @@ class MemoryStore {
       participants: this.participants.size,
       reactions: this.reactions.size,
       rateLimits: this.rateLimits.size,
+      calls: this.calls.size,
+      callParticipants: this.callParticipants.size,
     };
   }
 
@@ -433,6 +557,8 @@ class MemoryStore {
     this.participants.clear();
     this.reactions.clear();
     this.rateLimits.clear();
+    this.calls.clear();
+    this.callParticipants.clear();
   }
 }
 

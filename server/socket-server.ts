@@ -26,6 +26,34 @@ export interface ServerToClientEvents {
     emoji: string;
   }) => void;
   "reaction:remove": (data: { messageId: string; userId: string }) => void;
+  "call:incoming": (data: {
+    callId: string;
+    initiator: {
+      id: string;
+      displayName: string;
+      avatar: string;
+    };
+  }) => void;
+  "call:started": (data: { callId: string; roomUrl?: string }) => void;
+  "call:participant-joined": (data: {
+    callId: string;
+    participant: {
+      id: string;
+      displayName: string;
+      avatar: string;
+    };
+  }) => void;
+  "call:participant-left": (data: {
+    callId: string;
+    participantId: string;
+  }) => void;
+  "call:participant-updated": (data: {
+    callId: string;
+    participantId: string;
+    isMuted?: boolean;
+    isVideoEnabled?: boolean;
+  }) => void;
+  "call:ended": (data: { callId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -45,6 +73,30 @@ export interface ClientToServerEvents {
   "participant:update-status": (data: {
     participantId: string;
     isOnline: boolean;
+  }) => void;
+  "call:start": (
+    data: { roomId: string; participantId: string },
+    callback: (response: any) => void
+  ) => void;
+  "call:accept": (
+    data: { callId: string; participantId: string },
+    callback: (response: any) => void
+  ) => void;
+  "call:decline": (data: { callId: string; participantId: string }) => void;
+  "call:join": (
+    data: { callId: string; participantId: string },
+    callback: (response: any) => void
+  ) => void;
+  "call:leave": (data: { callId: string; participantId: string }) => void;
+  "call:toggle-audio": (data: {
+    callId: string;
+    participantId: string;
+    isMuted: boolean;
+  }) => void;
+  "call:toggle-video": (data: {
+    callId: string;
+    participantId: string;
+    isVideoEnabled: boolean;
   }) => void;
 }
 
@@ -194,6 +246,304 @@ export class VaporLinkSocketServer {
             }
           }
         );
+
+        // Call: Start
+        socket.on("call:start", async ({ roomId, participantId }, callback) => {
+          console.log(`📞 Call start requested by ${participantId} in room ${roomId}`);
+
+          // Check if there's already an active call
+          const existingCall = memoryStore.getActiveCallByRoomId(roomId);
+          if (existingCall) {
+            callback({ success: false, error: "Call already in progress" });
+            return;
+          }
+
+          // Create call
+          const call = memoryStore.createCall({
+            roomId,
+            initiatorId: participantId,
+            status: 'ringing',
+          });
+
+          // Get initiator info
+          const initiator = memoryStore.getParticipantById(participantId);
+          if (!initiator) {
+            callback({ success: false, error: "Participant not found" });
+            return;
+          }
+
+          // Create Daily.co room
+          let dailyRoomUrl: string | undefined;
+          try {
+            const apiUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/calls/create-room`;
+            console.log(`📞 Calling Daily.co API at: ${apiUrl}`);
+            console.log(`📞 Call ID: ${call.id}`);
+            
+            const response = await fetch(apiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ callId: call.id }),
+            });
+
+            console.log(`📞 Daily.co API response status: ${response.status}`);
+            
+            if (response.ok) {
+              const data = await response.json();
+              dailyRoomUrl = data.roomUrl;
+              console.log(`✅ Daily room created: ${dailyRoomUrl}`);
+              
+              // Update call with Daily room URL
+              memoryStore.updateCall(call.id, { dailyRoomUrl });
+            } else {
+              const errorText = await response.text();
+              console.error('❌ Failed to create Daily room:', response.status, errorText);
+            }
+          } catch (error) {
+            console.error('❌ Error creating Daily room:', error);
+          }
+
+          // Create call participant for initiator (auto-joined)
+          memoryStore.createCallParticipant({
+            callId: call.id,
+            participantId,
+            status: 'joined',
+            isMuted: false,
+            isVideoEnabled: true,
+          });
+
+          // Get all online participants in the room
+          const roomParticipants = memoryStore.getParticipantsByRoomId(roomId);
+          const onlineParticipants = roomParticipants.filter(
+            (p) => p.isOnline && p.id !== participantId
+          );
+
+          // Create call participants with 'ringing' status for all online users
+          onlineParticipants.forEach((p) => {
+            memoryStore.createCallParticipant({
+              callId: call.id,
+              participantId: p.id,
+              status: 'ringing',
+              isMuted: false,
+              isVideoEnabled: true,
+            });
+          });
+
+          // Broadcast incoming call to all online participants (except initiator)
+          socket.to(`room:${roomId}`).emit("call:incoming", {
+            callId: call.id,
+            initiator: {
+              id: initiator.id,
+              displayName: initiator.displayName,
+              avatar: initiator.avatar,
+            },
+          });
+
+          // Update call status to active
+          memoryStore.updateCall(call.id, { status: 'active' });
+
+          callback({ success: true, callId: call.id, roomUrl: dailyRoomUrl });
+        });
+
+        // Call: Accept
+        socket.on("call:accept", ({ callId, participantId }, callback) => {
+          console.log(`📞 Call accepted by ${participantId}`);
+
+          const call = memoryStore.getCallById(callId);
+          if (!call) {
+            callback({ success: false, error: "Call not found" });
+            return;
+          }
+
+          // Update call participant status
+          const callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+          if (callParticipant) {
+            memoryStore.updateCallParticipant(callParticipant.id, {
+              status: 'joined',
+            });
+          }
+
+          // Get participant info
+          const participant = memoryStore.getParticipantById(participantId);
+          if (participant) {
+            // Broadcast to room that participant joined
+            socket.to(`room:${call.roomId}`).emit("call:participant-joined", {
+              callId,
+              participant: {
+                id: participant.id,
+                displayName: participant.displayName,
+                avatar: participant.avatar,
+              },
+            });
+          }
+
+          callback({ success: true, callId, roomUrl: call.dailyRoomUrl });
+        });
+
+        // Call: Decline
+        socket.on("call:decline", ({ callId, participantId }) => {
+          console.log(`📞 Call declined by ${participantId}`);
+
+          // Update call participant status
+          const callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+          if (callParticipant) {
+            memoryStore.updateCallParticipant(callParticipant.id, {
+              status: 'declined',
+            });
+          }
+        });
+
+        // Call: Join (for users who declined or joined late)
+        socket.on("call:join", ({ callId, participantId }, callback) => {
+          console.log(`📞 Call join requested by ${participantId}`);
+
+          const call = memoryStore.getCallById(callId);
+          if (!call) {
+            callback({ success: false, error: "Call not found" });
+            return;
+          }
+
+          if (call.status === 'ended') {
+            callback({ success: false, error: "Call has ended" });
+            return;
+          }
+
+          // Get or create call participant
+          let callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+
+          if (!callParticipant) {
+            // Create new call participant (late joiner)
+            callParticipant = memoryStore.createCallParticipant({
+              callId,
+              participantId,
+              status: 'joined',
+              isMuted: false,
+              isVideoEnabled: true,
+            });
+          } else {
+            // Update existing participant
+            memoryStore.updateCallParticipant(callParticipant.id, {
+              status: 'joined',
+              leftAt: undefined,
+            });
+          }
+
+          // Get participant info
+          const participant = memoryStore.getParticipantById(participantId);
+          if (participant) {
+            // Broadcast to room that participant joined
+            socket.to(`room:${call.roomId}`).emit("call:participant-joined", {
+              callId,
+              participant: {
+                id: participant.id,
+                displayName: participant.displayName,
+                avatar: participant.avatar,
+              },
+            });
+          }
+
+          callback({ success: true, callId, roomUrl: call.dailyRoomUrl });
+        });
+
+        // Call: Leave
+        socket.on("call:leave", ({ callId, participantId }) => {
+          console.log(`📞 Call leave by ${participantId}`);
+
+          const call = memoryStore.getCallById(callId);
+          if (!call) return;
+
+          // Update call participant
+          const callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+          if (callParticipant) {
+            memoryStore.updateCallParticipant(callParticipant.id, {
+              status: 'left',
+              leftAt: new Date(),
+            });
+          }
+
+          // Broadcast to room
+          socket.to(`room:${call.roomId}`).emit("call:participant-left", {
+            callId,
+            participantId,
+          });
+
+          // Check if all participants have left
+          const callParticipants = memoryStore.getCallParticipantsByCallId(callId);
+          const activeParticipants = callParticipants.filter(
+            (cp) => cp.status === 'joined'
+          );
+
+          if (activeParticipants.length === 0) {
+            // End the call
+            memoryStore.updateCall(callId, {
+              status: 'ended',
+              endedAt: new Date(),
+            });
+
+            // Broadcast call ended
+            this.io.to(`room:${call.roomId}`).emit("call:ended", { callId });
+            console.log(`📞 Call ${callId} ended - all participants left`);
+          }
+        });
+
+        // Call: Toggle Audio
+        socket.on("call:toggle-audio", ({ callId, participantId, isMuted }) => {
+          console.log(`📞 Audio toggled by ${participantId}: ${isMuted ? 'muted' : 'unmuted'}`);
+
+          const call = memoryStore.getCallById(callId);
+          if (!call) return;
+
+          // Update call participant
+          const callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+          if (callParticipant) {
+            memoryStore.updateCallParticipant(callParticipant.id, { isMuted });
+          }
+
+          // Broadcast to room
+          socket.to(`room:${call.roomId}`).emit("call:participant-updated", {
+            callId,
+            participantId,
+            isMuted,
+          });
+        });
+
+        // Call: Toggle Video
+        socket.on("call:toggle-video", ({ callId, participantId, isVideoEnabled }) => {
+          console.log(`📞 Video toggled by ${participantId}: ${isVideoEnabled ? 'on' : 'off'}`);
+
+          const call = memoryStore.getCallById(callId);
+          if (!call) return;
+
+          // Update call participant
+          const callParticipant = memoryStore.getCallParticipantByCallAndParticipant(
+            callId,
+            participantId
+          );
+          if (callParticipant) {
+            memoryStore.updateCallParticipant(callParticipant.id, { isVideoEnabled });
+          }
+
+          // Broadcast to room
+          socket.to(`room:${call.roomId}`).emit("call:participant-updated", {
+            callId,
+            participantId,
+            isVideoEnabled,
+          });
+        });
 
         // Handle disconnect
         socket.on("disconnect", () => {
